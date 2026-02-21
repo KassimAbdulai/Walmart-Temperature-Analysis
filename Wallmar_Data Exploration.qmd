@@ -1,0 +1,124 @@
+---
+title: "Walmart Data Exploration"
+author: "Kassim"
+format: docx
+editor: visual
+---
+
+## Quarto
+
+Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+
+## Running Code
+
+When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
+
+```{r}
+# Load required packages
+library(tidyverse)
+library(lubridate)
+library(fixest)
+library(modelsummary)
+```
+
+You can add options to executable code like this
+
+```{r}
+df <- read_csv("Walmart_Sales.csv")
+
+df <- df %>%
+  mutate(
+    Date = parse_date_time(Date, orders = c("dmy","mdy","dmY","mdY")),
+    Date = as.Date(Date),
+    Store = factor(Store),
+    year  = year(Date),
+    month = month(Date),
+    # log transform for interpretability and to reduce skew
+    log_sales = log(Weekly_Sales)
+  )
+
+# quick checks
+stopifnot(sum(is.na(df$Date)) == 0)
+summary(select(df, Weekly_Sales, Temperature, Fuel_Price, CPI, Unemployment))
+
+```
+
+```{r}
+ggplot(df, aes(x = Date, y = Weekly_Sales, group = Store)) +
+  geom_line(alpha = 0.12) +
+  labs(x = "Week", y = "Weekly sales", title = "Weekly sales over time by store") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(df, aes(x = Temperature, y = Weekly_Sales)) +
+  geom_point(alpha = 0.15) +
+  geom_smooth(method = "loess") +
+  labs(x = "Temperature (°F)", y = "Weekly sales",
+       title = "Raw relationship between temperature and sales (not causal)") +
+  theme_minimal()
+```
+
+```{r}
+m_naive <- feols(log_sales ~ Temperature, data = df)
+etable(m_naive, digits = 3)
+```
+
+```{r}
+m_main <- feols(
+  log_sales ~ Temperature + Holiday_Flag + Fuel_Price + CPI + Unemployment |
+    Store + year + month,
+  data = df,
+  vcov = ~Store
+)
+
+etable(m_naive, m_main, digits = 3)
+
+```
+
+```{r}
+bT <- coef(m_main)[["Temperature"]]
+seT <- se(m_main)[["Temperature"]]
+
+bT
+seT
+```
+
+```{r}
+m_quad <- feols(
+  log_sales ~ Temperature + I(Temperature^2) + Holiday_Flag + Fuel_Price + CPI + Unemployment |
+    Store + year + month,
+  data = df,
+  vcov = ~Store
+)
+
+etable(m_main, m_quad, digits = 3)
+```
+
+```{r}
+df_lag <- df %>%
+  arrange(Store, Date) %>%
+  group_by(Store) %>%
+  mutate(lag_temp = lag(Temperature, 1)) %>%
+  ungroup()
+
+m_lag <- feols(
+  log_sales ~ Temperature + lag_temp + Holiday_Flag + Fuel_Price + CPI + Unemployment |
+    Store + year + month,
+  data = df_lag,
+  vcov = ~Store
+)
+
+etable(m_main, m_lag, digits = 3)
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```         
+```
