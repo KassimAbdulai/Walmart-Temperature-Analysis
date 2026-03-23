@@ -1,0 +1,959 @@
+---
+Title: "Data Translation Challenge" (Applied econometrics)
+GROUP 3
+---
+
+## **1. Introduction**
+
+Drunk driving remains a major public safety concern in the United States, contributing to accidents, injuries, and fatalities each year. To reduce repeat offenses, policymakers impose harsher legal penalties on individuals whose level of intoxication exceeds the legal limit. The effectiveness of such deterrence-based policies, however, is ultimately an empirical question.
+
+This study examines the causal effect of punishment severity on recidivism using administrative data from Washington State. The institutional setting provides a clear source of variation: drivers with a Blood Alcohol Content (BAC) of **0.08 or higher** face substantially harsher penalties than those just below the threshold. This sharp cutoff generates a discontinuous change in punishment severity that can be exploited for causal identification.
+
+The central research question is:
+
+**Do harsher punishments for drunk driving causally reduce the probability of future drunk-driving offenses?**
+
+Answering this question requires distinguishing the effect of punishment from underlying differences in driver behavior. Individuals with higher BAC levels may differ systematically in risk tolerance, alcohol dependence, or situational factors that independently influence the likelihood of re-offending. In causal terms, these factors create backdoor paths between BAC and recidivism. As a result, a simple comparison between drivers with higher and lower BAC levels would produce a biased, non-causal estimate.
+
+To address this identification problem, this study employs a regression discontinuity design (RDD) centered at the 0.08 BAC threshold. The key idea is that drivers with BAC levels just below and just above the cutoff are highly similar in both observed and unobserved characteristics, but face different levels of punishment. Under the assumption that determinants of recidivism evolve smoothly through the cutoff, any discontinuous change in recidivism at the threshold can be attributed to the causal effect of harsher punishment.
+
+By exploiting this policy-induced discontinuity, the analysis isolates variation in punishment severity that is plausibly exogenous to underlying driver characteristics. This provides a credible empirical framework for evaluating whether increased punishment deters future drunk-driving behavior.
+
+## **2. Data**
+
+### **2.1 Data Description**
+
+The analysis uses the *DWI_Data.rdata* dataset, which contains administrative records of over 500,000 traffic stops in Washington State. Each observation corresponds to a driver who was tested for blood alcohol content (BAC) during a traffic stop, along with information on demographic characteristics, accident involvement, and subsequent recidivism.
+
+The primary outcome variable is **recidivism**, defined as an indicator for whether the driver committed a subsequent drunk-driving offense following the initial stop. This variable captures the behavioral response of interest and serves as the dependent variable in the analysis.
+
+The key variable determining treatment assignment is **blood alcohol content (BAC)**. The dataset includes two independent BAC measurements for each driver, recorded as `bac1` and `bac2`.
+
+Additional variables include demographic characteristics (`male`, `white`, `aged`) and an indicator for whether the traffic stop involved an accident (`acc`). These variables are not used as primary controls, but instead play a role in validating the identification strategy.
+
+## Setup and load the data
+
+```{r}
+library(tidyverse)
+library(fixest)
+library(modelsummary)
+library(rdrobust)
+library(rddensity)
+library(broom)
+library(scales)
+library(DiagrammeR)
+library(knitr)
+
+loaded_obj <- load("DWI_Data.rdata")
+dwi <- get(loaded_obj[1])
+
+names(dwi)
+glimpse(dwi)
+summary(dwi)
+```
+
+### **2.1Construction of the Running Variable**
+
+Each driver is assigned two BAC measurements, recorded as `bac1` and `bac2`. In this analysis, the running variable is constructed using the **first BAC measurement (`bac1`)**.
+
+This choice is motivated by measurement consistency and data reliability considerations. The first BAC reading is typically recorded immediately at the time of the traffic stop and is less likely to be affected by delays, measurement adjustments, or procedural variation that may occur between tests. As a result, `bac1` provides a consistent and comparable measure of intoxication across drivers.
+
+Using a single, consistently measured BAC variable also avoids introducing additional noise that could arise from combining multiple measurements. In particular, constructing the running variable using averages or other transformations may attenuate variation near the cutoff and weaken the discontinuity that the regression discontinuity design relies on for identification.
+
+Importantly, the validity of the regression discontinuity design depends on accurately ordering observations relative to the 0.08 threshold. As long as `bac1` provides a reliable ranking of drivers around the cutoff, it is sufficient for identifying the local treatment effect. This assumption will be supported through graphical and diagnostic analyses in subsequent sections.
+
+Accordingly, `bac1` is used as the running variable to maintain consistency, minimize measurement noise, and preserve the integrity of the discontinuity at the policy threshold.
+
+## **2.2 Data Cleaning and Construction of Key Variables for RDD Analysis**
+
+To implement the regression discontinuity design, the dataset is processed to construct the running variable, treatment indicator, and variables required for identification and validation. Each step is guided by the institutional setting and the requirements of the RDD framework.
+
+### **Running Variable Construction**
+
+The running variable is defined as the first BAC measurement (`bac1`). Observations with missing or invalid BAC values are excluded to ensure accurate ordering of drivers relative to the policy threshold.
+
+This step is necessary because regression discontinuity designs rely critically on the precise measurement of the running variable at the cutoff. Any mismeasurement or missing values could distort the discontinuity and bias the estimated treatment effect.
+
+### **Treatment Indicator**
+
+A treatment indicator is constructed based on the legal BAC threshold of 0.08:
+
+![](images/clipboard-588185864.png){width="204" height="29"}
+
+This indicator captures whether a driver is subject to harsher penalties. The discontinuous change in this variable at the threshold provides the source of identifying variation in the analysis.
+
+### **Centering the Running Variable**
+
+To facilitate interpretation and estimation, the running variable is centered at the cutoff:
+
+![](images/clipboard-66697953.png){width="184" height="33"}
+
+Centering ensures that the cutoff is located at zero, allowing the estimated discontinuity to be interpreted directly as the treatment effect at the threshold.
+
+### **Sample Restriction for Local Identification**
+
+The analysis restricts the sample to observations within a bandwidth around the cutoff. This restriction focuses the comparison on drivers with BAC levels close to 0.08, who are plausibly similar in both observed and unobserved characteristics.
+
+This step is essential for identification. Including observations far from the cutoff would introduce systematic differences in driver behavior, violating the local comparability assumption underlying the regression discontinuity design.
+
+The choice of bandwidth reflects a trade-off between bias and variance. A narrower bandwidth improves comparability but reduces sample size, while a wider bandwidth increases precision at the cost of potential bias. The selected bandwidth will be justified and evaluated in subsequent analyses.
+
+### **Construction of Variables for Validity Checks**
+
+Demographic variables (`male`, `white`, `aged`) and the accident indicator (`acc`) are retained for use in diagnostic and validation tests.
+
+These variables are not included as controls in the baseline specification. Instead, they are used to test whether observable characteristics evolve smoothly through the cutoff. Under the identifying assumptions of the RDD, these variables should not exhibit discontinuities at the threshold.
+
+Testing for such discontinuities provides evidence on whether the local randomization assumption is plausible.
+
+```{r}
+dwi <- dwi %>%
+  mutate(
+    bac1 = as.numeric(bac1),
+    bac2 = as.numeric(bac2),
+    male = as.numeric(male),
+    white = as.numeric(white),
+    aged = as.numeric(aged),
+    recidivism = as.numeric(recidivism),
+    acc = as.numeric(acc),
+
+    # Alternative BAC measures for robustness
+    bac_mean = rowMeans(cbind(bac1, bac2), na.rm = TRUE),
+    bac_mean = ifelse(is.nan(bac_mean), NA, bac_mean),
+
+    bac_max = pmax(bac1, bac2, na.rm = TRUE),
+    bac_max = ifelse(is.infinite(bac_max), NA, bac_max),
+
+    # 0.08 RDD variables
+    bac_c_08 = bac1 - 0.08,
+    treat_08 = if_else(bac1 >= 0.08, 1, 0, missing = NA_real_)
+  ) %>%
+  filter(
+    !is.na(bac1),
+    !is.na(recidivism)
+  )
+
+summary(
+  select(
+    dwi,
+    bac1, bac2, bac_mean, bac_max,
+    bac_c_08, treat_08,
+    recidivism, male, white, aged, acc
+  )
+)
+```
+
+## **3. Basic Data Exploration**
+
+To understand the structure of the data and assess the suitability of the regression discontinuity design, we begin by examining the distribution of the running variable and key summary statistics.
+
+**Distribution of the Running Variable**
+
+Figure 1 displays the distribution of the primary BAC measure (`bac1`), with the legal cutoff at 0.08 indicated by a vertical dashed line.
+
+The distribution is smooth and continuous around the threshold, with no visible discontinuity or sharp change in density at 0.08. In particular, there is no evidence of excess mass just below the cutoff or a corresponding drop just above it.
+
+This analysis is conducted because the validity of the regression discontinuity design depends on the assumption that individuals cannot precisely manipulate the running variable to influence treatment assignment. If drivers were able to strategically adjust their BAC to avoid harsher penalties, we would expect to observe bunching below the cutoff.
+
+The absence of such bunching suggests that drivers are unlikely to precisely manipulate their BAC levels at the threshold. This provides preliminary evidence in support of the continuity of the running variable, which is a key identifying assumption for causal inference in this setting.
+
+However, visual inspection alone is not sufficient to fully validate this assumption. In subsequent sections, we formally test for manipulation using density based methods to ensure that the identifying assumptions of the regression discontinuity design hold.
+
+### **Summary Statistics**
+
+We next summarize key outcome and demographic variables in the sample.
+
+The average recidivism rate provides a baseline measure of repeat offending behavior, while the accident rate captures the severity of the initial incident. Demographic variables such as age, gender, and race offer additional context on the composition of the sample.
+
+These summary statistics serve two purposes. First, they provide a general understanding of the population under study. Second, they establish baseline levels against which treatment effects can later be interpreted.
+
+### **Interpretation and Implications for Identification**
+
+The combination of a smooth running variable distribution and meaningful variation in outcomes suggests that the dataset is well-suited for regression discontinuity analysis.
+
+In particular, the lack of visible manipulation around the cutoff supports the assumption that drivers just above and just below the threshold are comparable in both observed and unobserved characteristics. This local comparability is the key condition that allows the discontinuity in punishment severity at 0.08 to be interpreted as a causal effect.
+
+However, visual inspection alone is not sufficient to fully validate this assumption. Formal tests for manipulation and covariate continuity will be conducted in later sections to provide more rigorous evidence.
+
+```{r}
+
+ggplot(dwi, aes(x = bac1)) +
+  geom_histogram(
+    binwidth = 0.005,
+    boundary = 0,
+    color = "white",
+    fill = "skyblue"
+  ) +
+  geom_vline(
+    xintercept = 0.08,
+    linetype = "dashed",
+    color = "red",
+    linewidth = 1.2
+  ) +
+  labs(
+    title = "Distribution of Primary BAC Measure",
+    x = "BAC (bac1)",
+    y = "Count"
+  )
+
+dwi %>%
+  summarise(
+    n = n(),
+    recidivism_rate = mean(recidivism, na.rm = TRUE),
+    accident_rate = mean(acc, na.rm = TRUE),
+    mean_age = mean(aged, na.rm = TRUE),
+    share_male = mean(male, na.rm = TRUE),
+    share_white = mean(white, na.rm = TRUE)
+  )
+```
+
+## **4. Causal Diagram and Identification Strategy**
+
+The causal diagram formalizes the identifying challenge in this setting and clarifies why a simple comparison of drivers above and below the legal threshold would not, by itself, recover the causal effect of harsher punishment on future recidivism.
+
+The outcome of interest is **future DUI recidivism**, and the treatment of interest is **harsher punishment**. Punishment severity is not assigned randomly. Instead, it is triggered when a driver’s measured BAC crosses the legal threshold of 0.08. As a result, BAC plays two roles in the design: it is both the running variable that determines treatment assignment and a variable that is related to underlying driver behavior.
+
+The main causal pathway of interest is:
+
+**Above Cutoff→Harsher Punishment→Future DUI Recidivism**
+
+Crossing the threshold increases punishment severity, and the research question is whether this increase reduces the probability of future offending.
+
+At the same time, there are important backdoor paths that would bias a naïve comparison. In particular, underlying driver characteristics such as risk tolerance, alcohol dependence, impulsiveness, and general propensity for risky behavior may affect both BAC and the likelihood of future recidivism. In the diagram, these are represented by **Driver Characteristics**, which open the backdoor path:
+
+**BAC←Driver Characteristics→Future DUI Recidivism**
+
+This path implies that drivers with higher BAC levels may also be systematically more likely to reoffend, even in the absence of harsher punishment. For that reason, comparing all drivers with BAC above 0.08 to all drivers below 0.08 would confound the effect of punishment with pre-existing differences in behavior.
+
+The identifying insight of the regression discontinuity design is that this backdoor problem can be substantially reduced by focusing only on drivers very near the 0.08 cutoff. While BAC is clearly endogenous in the full sample, small differences in BAC just below and just above the threshold are much less likely to reflect meaningful discontinuities in underlying driver characteristics. Under the continuity assumption, driver characteristics and other determinants of recidivism evolve smoothly through the cutoff, while punishment severity changes discretely. This creates a setting in which the jump in punishment at 0.08 can be used to identify a local causal effect.
+
+The causal diagram therefore motivates the core empirical strategy. I use the diagram because it clarifies that the main threat to identification is confounding through underlying driver characteristics. The diagram shows that the goal is not to control mechanically for every available covariate, but rather to exploit the discontinuity in treatment assignment at the legal threshold. The analysis therefore relies on local comparisons around the cutoff, and the validity of this strategy depends on whether the identifying assumptions of the regression discontinuity design are plausible.
+
+These assumptions will be assessed in the next stage of the analysis by examining whether the running variable appears manipulable near the cutoff and whether observable characteristics remain smooth through the threshold.
+
+![](data:image/png;base64,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dQoR+P8JIKCxQNevX9/jEODtQW72cePGeTRu4oJoEwEREAERyDwBiefMt0FsS5AonmMLQRUXgQgRYACPiN64caOddtppntoKqzProB955BFLtEQzmK9QoYLcSiPUfipKdhPACwsBfcYZZ7iArlq1qvXo0cPuvPNO9/woXbp0dldQpRcBERCBHCAg8ZwDjZitVZC1OVtbTuXOdQLBjRR3bgKHYf3CEt22bVsjvRWW6AsvvNBWr17tbtxYyWSJzvW7QvVLBwEENEspSB03a9YsTy9HJO5bb73V44SUKVNGsULS0RC6hgiIgAgUQEDiuQAw2p0eAlrvnB7OuooIFIdAoiWaNdH33XefLVu2zJo3b26PPfaYW6I7duzo66RD1GAFFisOaX1HBP5HIFigq1WrZqSuOuecc+zGG2+0AQMGeA72smXL/u9gvRIBERABEUgrAYnntOLWxQIBrM5y2w409CwC0SYQLNGsjT7xxBPdEk00YCzR8+bNc0t0u3bttoho3LlliY52m6p00SfAEop9993XU1edf/75NmzYMOvTp48vq0BAa/I5+m2oEoqACOQeAYnn3GtT1UgEREAEUkIgpLj6+eefPbAY+aGXLFlirVu3tgULFlidOnU8xdXKlSt9LbRS7aSkGXTSGBFAQO+88842fvx4D9qH90fPnj2N/0EicUtAx+hmUFVFQAQiQUDiORLNEM9CYHnGoqUf/3i2v2qdvQT4nw0prlibyYB+8eLFvg760UcftXr16hmWaIQ1Fmgs0YoWnL3trZJnjgC/kwhoLM3Dhw+3bt26uSW6U6dO9v333xvxBrSJgAiIgAikj4DEc/pY60r/P4EglhkUaBMBEcheAsES/csvv3hgoyCiEc6siUZEE1iMiN38v1eqVEnRubO3uVXyDBHgf2fDhg0ecfv222+3K6+80ubMmeNeHp9//rlPTmWoaLqsCIiACMSOgMRz7JpcFRYBERCB5BIIlmjyRB9//PE2cuRIDyxGntqFCxe6Ozfro3ktS3Ry2ets8SCAgMZVm+dBgwZ58DAi4BO87+2333YLNJ9pEwEREAERSC0BiefU8tXZCyDAjzyPYIUu4DDtFgERyCICiZZo3LlHjRrlgpmI3LhzN2jQwNq0aePCmmrJEp1FjauiZpwAv5nkYGe507XXXuvpq9auXWstWrQwnnHhloDOeDOpACIgAjlOQOI5xxs4ytWTeI5y66hsIlB8AkyKsU4zWKLvvvtuI4gYLtykugru3LJEF5+xvhlfAvxfkYMd9+17773X3n//fQ/at2rVKlOQvvjeF6q5CIhAeghIPKeHs65SAAEG2bI+FwBHu0UgywkESzTWsuOOO84DiyGYO3fuvMUS3apVK1u6dKn3Awz8leIqyxtdxU8LAQQ0btz8LxGJ+9///reRzopYA1iglW89Lc2gi4iACMSQgMRzDBs9KlWWe1lUWkLlEIHUEsDN9KeffjICix177LEeNRgrWYcOHTyYWP369d0qTe5oBv0M/iWiU9smOnv2EwiTU7htT5s2zcqUKeNR7gkmpv+h7G9f1UAERCCaBCSeo9kusSiV3LZj0cyqpAhsIRBENFaz6tWre2AxLNFdu3Y1hHPDhg19/eaiRYt87WYQAPJO2YJQL0TgDwT4nyJtHEsh5s6da1WqVPGJqEmTJnkUbk1C/QGX3oiACIhAiQlIPJcYoU4gAiIgAiJQFAJBRGOJxp172LBhviaa3LWrV6/2wGIhOjeTbAQWkwgoCmEdGycCTC6tX7/eTj75ZJsxY4btt99+nsZqzJgxyrEepxtBdRUBEUgLAYnntGDWRfISYECMeyaDaG0iIALxJMD/P4HFWBN99NFH2z333OPRuVnHuXjxYrdEt2zZ0q3S9BlYorfffnvFSYjn7aJab4PA999/7/9Hs2fP9pRxl1xyiY0YMcLKli3rOaK38XV9LAIiIAIiUAgCEs+FgKRDREAEREAEUkcAEb1hwwZ/sCaaAf/y5cutS5cuxtpo3LkR0bh4Y2WrXLmyAiKlrjl05iwmgAW6WrVqNnnyZDv11FM9Ijd5oZms3mGHHbK4Ziq6CIiACESDgMRzNNohlqXQmudYNrsqLQIFEkAYY4nGnRtLNCIaC3SiiCY4EhGFEQMVKlRwS3SBJ9QHIhBDAj/88INVrVrVJk6caDVr1jTEc79+/dzDAyu0NhEQAREQgeITkHguPjt9M0kEFAwoSSB1GhHIEQKJlmgCiyGiSWfVo0cPXxN93nnnWbNmzdwSzbGyROdIw6saSSNAELG9997bBXSTJk38f+iKK64whHW5cuWSdh2dSAREQATiRkDiOW4tHrH6SjhHrEFUHBGIEIFgiSaf7VFHHWVDhw51d26icz/zzDPWqFEjj8798MMPe0CxsCY6QlVQUUQgIwTw7MKLY5dddvGo9q1btzYicF900UX21VdfWfny5TNSLl1UBERABLKdgMRztrdglpY/BAyTeM7SBlSxRSCNBIIlOojou+66y0hnRUCklStX2vnnn29Nmza1xx9/3Mh9K0t0GhtHl4o0AWIJEK2eYHyXXXaZLViwwC6++GL79NNPPQBfpAuvwomACIhABAlIPEewUVQkERABERCBPxNgsu2nn36yIKLvuOMOW7NmjXXr1s2ee+45w52bwGLz58+XJfrP+LQnpgT4fyFY2C233GI33HCDLVu2zFq1amXvvvuuVaxYMaZUVG0REAERKB4BieficdO3kkBAAcOSAFGnEIEYEki0RB9xxBEWLNGs6cQSzRpPrNFY2YIlWnmiY3ijqMpbCJAOjsknAoeRV33t2rUuoF999VW3TG85UC9EQAREQAS2SkDieat49GGqCchtO9WEdX4RyF0CwRKNayprogcPHmxPPvmkBxZ7/vnnrXHjxm6Jnjt3rjFZpzXRuXsvqGbbJvDrr796JPvLL7/cJkyYYG+//baxFpr/FZY6aBMBERABEdg2AYnnbTPSESkiwGBWmwiIgAiUlACW6ODO/de//tWGDx/ua6J79uzp0bkvuOACF9KkuOJY1oBiidbkXUnJ6/vZRgABTcTt9u3bu4D+6KOP/H+DSaeddtrJJ5myrU4qrwiIgAikk4DEczpp61p/IBDctjWA/QMWvREBESgmAfoSrNBEGT7yyCPt1ltv9TXRl156qb300kvuyt28eXObN2+eC2esbXLnLiZsfS1rCTCBhIAmPsCUKVN84on/CwLusQaaHOraREAEREAE8iegHjJ/LtqbYgII5yCeU3wpnV4ERCBmBII79y+//GKHH3643XnnnW6JZk30008/bcESTWAxjkUwbL/99rJEx+w+iXN1g4Am3dv06dP997hFixb+mjRWmlSK892huouACGyNgMTz1ujoMxEQAREQgawlgEAIlmgCi7EmetWqVcaaz5dfftnTWxFcDEs0x+K2KtGQtc2tgheRQBDQtWvXdgs0yxnatWtnY8aMsTJlyviEUhFPqcNFQAREIOcJSDznfBNHt4KyPEe3bVQyEcglAomW6MMOO8xIcUW6HizRBEtq1qyZr/ucPXu2V5vAYqVLl5YlOpduAtUlXwL8b+DCXaNGDZszZ44xycQyB/5H8MYgxZU2ERABERCB/xGQeP4fC71KMwGJ5zQD1+VEIOYEsLSR85Y10bhzDxkyxJYvX24EFnvxxReNdZ/kin744YeNwEpYorX+M+Y3TQyqHwT0scce6xbok046yfr3728DBw702ktAx+AmUBVFQAQKTUDiudCodKAIiIAIiEAuEAiWaIR0ENHkh0ZEv/LKK1vWRM+cOdOrGyzRuVB31UEECiLw448/Gp4ZkydPNly5mVwiLzQTSWXLlpUnRkHgtF8ERCBWBCSeY9Xc0aqsLM/Rag+VRgTiRiCsiSbNFaIBsbB06VK76qqr7IUXXrBWrVpZgwYNjMBiGzdu1JrouN0gMasvk0p4Zeyzzz42adIkj8Z99913+/8DE00EEuMYbSIgAiIQZwISz3Fu/QzWHeHMxg+xfowz2BC6tAiIgPdBBBbjUa1aNbvpppuMvLe9evWyt99+29dEE1hs2rRpfqws0bppcpkAk0mkcRs1apR17NjRxo0bZ927d/e10RUqVMjlqqtuIiACIrBNAhLP20SkA1JFIAjoVJ1f5xUBERCBohAIlmhE9CGHHOKW6MWLF1vfvn3dEt2mTRurV6+ezZ0710iDpTzRRaGrY7OJAAKaiNt33XWXXXbZZTZjxgzr0qWLrVu3ziSgs6klVVYREIFkE5B4TjZRna/QBOS2XWhUOlAERCCNBPCGCSmucOcmcBL5oa+88kp7//33jXy4WKKnTJliv/32m8kSncbG0aXSQoDfZ/4HeCbFG2ufSenWsmVL+/TTT/2e1wR4WppCFxEBEYgYAYnniDVI3IoTXLb1Ixy3lld9RSD6BIKIRkQceOCBboletGiRCwnyRF944YVuiZ41a5ZH8cYSTXofbSKQCwT4XcbDAo+MAQMG2I033mgrVqxwAf3GG2+4gM6FeqoOIiACIlAUAhLPRaGlY5NKQII5qTh1MhEQgRQRQEQTMIloxIceeqhdf/319tRTT1nv3r3tww8/tNatW2+xRG/atMkqVqwoEZ2ittBp00+AYHl4WPTp08eGDh1qa9euNZYwPPfcc36v67c8/W2iK4qACGSOgMRz5tjH9sqJ1mZmtMP72AJRxUVABLKCQKIlumrVqu7OumTJEvvHP/5hr7322hZLNOtDsdhVqlTJSpcunRV1UyFFoCACiGMmhRDRl156qQcSe+utt6xx48bG/c+yBQnoguhpvwiIQK4RkHjOtRbNkvrohzZLGkrFFAER+BMBRDTiGEv0wQcfbNddd52tWbPGLXMfffSRtW3b1s477zxfE43FGhEtd+4/YdSOLCNAvmfuZyJwk8qK13hdPProoy6gt9tOQ8osa1IVVwREoBgE1NMVA5q+khwC/NDK6pwcljqLCIhA+gkESzSRibFE33zzzZ4nmuBK77zzjrVv397q1q1rkydPdrGNO7cs0elvJ10xeQRw3+Z+b9asmUfgJvI2k0XTp0/3KNylSpVK3sV0JhEQARGIIAGJ5wg2iookAiIgAiKQPQSCJfqHH36wgw46yKNzr1q1ygOLffLJJ9ahQwerX7++TZ061SMYK7BY9rStSvpnAiy3wuuidu3anvu8SpUqvmTh/vvvt/Lly5sE9J+ZaY8IiEDuEJB4zp22zLqa4Loty3PWNZsKLAIisBUCIcUVlugQnfiaa66xjz/+2C3RDRo0sAcffNBdXlkrusMOO2zlbPpIBKJJgN9uJotOPvlkz3t+9NFHW/fu3X09NAKaZQr6fY9m26lUIiACJSMg8Vwyfvp2CQnox7WEAPV1ERCByBGgX2M9KOLigAMOsEGDBnmKH9L9kCf64osvdndu8kRjwZMlOnJNqAIVksD69evtiCOOcLft448/3i6//HK7/fbbrVy5cpoYKiRDHSYCIpBdBEr17dv3huwqskqb7QRY60zgEXKjsnaKXKllypTxXJLZXjeVXwREQAQSCdDXEal41113tbPOOsvOP/98D6705JNP+lpo3LvxwiHwGIHF2FhXqk0EsoUAwfP+8pe/WM2aNY385xMmTHCr8+mnn+4u3Lqfs6UlVU4REIHCEJDluTCUdExKCISI27I+pwSvTioCIhARAsESjZV5v/32s5tuuskDiw0cONAt0V26dLFatWp5BGMseTvttJOic0ek7VSMwhHAy2Lffff1e7hhw4Z+j5MXmvRWZcuWLdxJdJQIiIAIZAEBiecsaCQVUQREQAREIDcIBHfu/fff31gL/dRTT3me6P/85z+eAogUV2PGjNGa6Nxo7tjUgsnw//73v7b77rvb6NGjrWnTpnbvvffaJZdcYuvWrXM37tjAUEVFQARymoDEc043b7Qrx48tUTu1iYAIiECcCARLNMtW9t57bw8stnjxYl8bTZ7obt26uQssuXS///57XxOtFFdxukOyt67c03hO3HfffR5lftq0ada5c2f78ssvPZVV9tZMJRcBERCB/yMg8aw7QQREQAREQAQyQAARzXpRXLWrbo7OjZsrlmgCiyGaO3bsaI0aNXJLHlY98kQTnTsseclAkXVJEdgqAe5NvCvI/zxs2DDr1auXPfbYY54L+sMPP5SA3io9fSgCIpANBCSes6GVcrCM/MDy0HrnHGxcVUkERKBIBOgHSXGF1W6PPfawG264wRYtWuSW6M8//9x69OhhZ599tpFHF1EdRHSRLqKDRSCNBBDQeEsQaZ77mQB5rVq1srfeesvv3zQWRZcSAREQgaQSkHhOKk6drCgEZD0pCi0dKwIikOsEENEEWEIgsyZ6czYMW7NmjRFYjGBjBBarX7++W6IJ0ISIRqCoL831OyM768e9zD3N2v67777bXnnlFWvTpo299NJLWyLLZ2fNVGoREIE4E5B4jnPrZ7jusjxnuAF0eREQgcgSwBKNqzYpgPr37+/RuYnS/e9//9uDMBGde/z48Z5LWpboyDZj7AtGmjaWJnTv3t1TWL3zzjvWpEkTe+aZZ3wtvyZ+Yn+LCIAIZB0Bieesa7LcKjCz0jy0iYAIiIAI/JFAoiWawGKsiV65cqWnAWKdNIHF6tSp48GZsFaTJ1qW6D8y1LvMEyDPM54Tbdu29dzm3333nbVs2dJWrFghAZ355lEJREAEikhA4rmIwHR48ghoxjl5LHUmERCB3CbAGtJgicYNdvny5S6iEc2XXnqp1a1b10U0onrHHXe0MmXK5DYQ1S6rCJBZg3uVFFbTp093a3Tz5s3tkUce8eUHpUqVyqr6qLAiIALxJSDxHN+2z3jN5bad8SZQAURABLKIQLBEI5D32msvXxONiB48eLDn0kVE165d29dEkze6cuXKbonOoiqqqDlMgPuXe7devXo2ZcoUvzcR0FOnTvU80BLQOdz4qpoI5BABieccasxsqkqwOstlO5taTWUVARGICgEs0bjCEp37qquuslWrVtktt9ziaYIQ0eeee67de++9LlZkiY5Kq6kcQUATPX727Nm23377WadOnWzUqFGehk35zHWPiIAIRJ2AxHPUWyiHyxcEdA5XUVUTAREQgZQRQIiEPNFVqlTxNdFLliyx2267zVhXevnll3uKq7Fjx3qgMVmiU9YUOnERCHDfEi3+hBNOcKvzwQcfbFdccYUNGTLEtttuOxfRRTidDhUBERCBtBKQeE4rbl0skQDimXVQ2kRABERABEpGABGNICE6d69evWz16tV26623eh97ySWXuCV6xIgRvu4US/QOO+ygFFclQ65vl4BAENBHH320zZw500488UTPBz1gwAC/Z7VmvwRw9VUREIGUEpB4TilenVwEREAEREAE0kMgWKIR0bvttpuviV60aJENHTrU3bcR1WeeeaaNGTPGLdFE50ZEaxOBTBFg6cEhhxziQcQaNmxod955p9+35IguW7assnFkqmF0XREQgQIJSDwXiEYfpJpAcNtmwKdNBERABEQgeQQQH+vWrXNL9GWXXeaWaNy5CcoU1kQPHz7c3btliU4ed52p6ASIIr/nnnv6pE7r1q19/TP3LMK6fPnyRT+hviECIiACKSQg8ZxCuDr1tglIOG+bkY4QAREQgeISCIHFdt55Zw8stnDhQrfu/fTTT9a7d28744wzPMXVt99+6ymuZIkuLml9ryQEuB9Zk0/gsK5du3o+aJYbkN4KAa2xQkno6rsiIALJJCDxnEyaOlehCWB15qEfxEIj04EiIAIiUGwCmzZtcks0gcWwPK9cudJuv/1223777T2wWP369Y010aS4qlixotZEF5u0vlhcAhs2bPD7EddtIsg/9NBD1r59e/vmm2/8nizuefU9ERABEUgmAYnnZNLUuYpEILhtF+lLOlgEREAERKDYBLBE4ya70047ueV58eLFhvs24hpLNGui77nnHguWaAVuKjZqfbGIBBgTEPiOSfVBgwYZwcPwlGjbtq19/PHH7hlRxFPqcBEQARFIOgGJ56Qj1QmLQkCW56LQ0rEiIAIiUHIC9LvBEr377rsb7rHLly93d27WRBNYrE6dOnbXXXe5iJYluuTMdYbCE0BA//rrr/aPf/zDBg8e7F4SrIV+44033AKtiffCs9SRIiACyScg8Zx8pjpjIQkEt20J6EIC02EiIAIikGQCYU0060179uxpy5Ytc9FM/4zrbM2aNbeI6AoVKpgs0UluAJ3uTwS495jcIegdEzksJ3juuefs/PPPt6efftot0BLQf8KmHSIgAmkiIPGcJtC6zJ8J6Mfvz0y0RwREQATSTSBYor/77jvbZZddrEePHrZkyZI/iOhatWq5iPn666+1JjrdDRTT62F9ZnKnW7duNnbsWPvss8+sVatWRvo1IsRvt52GsDG9NVRtEcgoAfU8GcUf34sjnHn8/vvv8YWgmouACIhAhAjQJ+MyS4ogLNEEFsMSzZpoonBjia5bt64NGzbMgzhhiSYXrzYRSBWB3377zQgk1qFDB5s4caK/btOmjc2ZM8e4/1hmoE0EREAE0klA4jmdtHUtERABERABEYg4gWCJJk0QKa7IuUtgMQKJsfXp08fOOussF9VffPGFVapUSdG5I96m2Vw8BDRB7po2beoprJiwYQ305MmTPY2VBHQ2t67KLgLZR0DiOfvaLOtLHNY4Y+UIr7O+UqqACIiACOQgAdadrl+/3i3RuM+GNdG4zSKiSXF1xx13GO7cYU00fbs2EUgmAbzU8IioXbu2W50PPfRQ69Kli40bN87KlSvnKa40nkgmcZ1LBESgIAISzwWR0f60ENCPXVow6yIiIAIiUGwC9NNBRGNlxp37iSeesJEjR/rym2uuucZTXOHejSWa6NwKLFZs3PpiAQS4D3/44Qc7/vjjbebMmXbUUUdZ9+7dfW0+1ujSpUsX8E3tFgEREIHkEZB4Th5LnamIBBTso4jAdLgIiIAIZJgAUZCDO3fnzp3dEk00ZNZIY4muV6+eDRkyxL766isP6oSIliU6w42WY5dHQFerVs2mT59uJ510kl199dWe0op1+Ty0iYAIiEAqCUg8p5Kuzl0ggb/JrEgAAEAASURBVDCYYiaZR3hf4Bf0gQiIgAiIQGQIEFgMEYOVGUv0448/7pZoxAv5ec844wwPLPb5559vEdGRKbwKkvUEWEqw//77u4AmiN11111nN9xwg48l5PWQ9c2rCohApAlIPEe6eVQ4ERABERABEYguASzR69at88BiWKJJcUVgMQKN9e3b16NzY4n+8ssvt4hoTZZGtz2zpWTcQ6yB3nPPPX3dc6NGjdz6fOWVV3p6K0WBz5aWVDlFIPsISDxnX5vlTIlx28bqrE0EREAERCC7CQRLNEHDyBONJXrUqFEeRKx///5uiR46dKgFS7TETXa3d1RKj4DeddddPQ80EbhHjx7t0eHJWV6+fPmoFFPlEAERyCECEs851JiqigiIgAiIgAhkksCvv/7qluiddtrJOnXqZIsWLXJ3bt7369fPzjnnHLcQfvbZZ1sCi8kSnckWy+5rc++QB5pAdnfffbfh/TB16lS76KKLjHuMyRxtIiACIpBMAhLPyaSpcxWJAD96pJ/QJgIiIAIikFsEsERjFcT617VrV1u4cKHdd999LnIGDBhgNWvW9MBiROdG4MgSnVvtn+7aIKC5h0ib1qtXL5+0wRL93nvv+SRNusuj64mACOQuAYnn3G1b1UwEREAEREAEMkaAZTlYoonOjeW5Y8eOnuIKEc173LkR0YMHD7ZPP/1UluiMtVRuXJgJm1KlStlNN93kj2effdbatm1rr776qgR0bjSxaiECkSAg8RyJZohfIbA689Ca5/i1vWosAiIQPwLBEr3jjju6ay2WaNansl6VSMm1a9e2W2+91ddEY4kuV66csjDE7zYpcY3JR/7bb7/ZVVdd5YHrXnrpJWvatKmtXbvWvR4Yd2gTAREQgZIQkHguCT19t0QEwo+YBHSJMOrLIiACIpAVBOjrQ55oUlxdfPHF9thjj3mwJyzRiOizzjrLLdEfffSRLNFZ0arRKyTeDoholgtMmjTJI723atXKVq9eLQEdveZSiUQg6whIPGddk+VWgSWcc6s9VRsREAERKAwBxA1rorFEE9wpWKL32GMPF9F16tSxQYMGbQn6xHrWMOFamPPrmHgTQED/97//NdY9z5gxw++1Fi1a2OLFi61y5cpGtg9tIiACIlAcAuo9ikNN30kKAbltJwWjTiICIiACWUkgWKLXr1/vQcNYE/3II4943t5ddtnFBg4c6CmucOf+8MMPXWhLRGdlU2ek0AQkZb39ueeea5MnT/YApc2aNbP58+e7V4MEdEaaRRcVgawnIPGc9U2YvRWQFSF7204lFwEREIFkEsCdGxGNO3f79u09sNjYsWNt3333teuvv97q1q1rN954o33yySdbonPrNySZLZCb52KChvuKFGmzZs2y3XbbzYOI4c5NJPjtt98+NyuuWomACKSMgMRzytDqxIUhILftwlDSMSIgAiIQDwK4c//www8eMIw10VgJx48f76IHN+7TTz/dbrnlFmNNNC7fSnEVj/uiJLUMAvq0007zHNB77723dejQwQOKlS5d2nhoEwEREIHCEpB4LiwpHZdUAlgM5LadVKQ6mQiIgAjkDIGQ4gpLdLt27dwSPW7cONtvv/3shhtucEsiz4kiWm64OdP8Sa9IENDHHnusTZ8+3Y444gi78sorfSKGi+2www5Jv6ZOKAIikJsEJJ5zs12zolZyucuKZlIhRUAERCBjBEJgMSzMBBZjTfSECROMwGI333yzW6LJ64uIxg2XFFfaRKAgAgSpQzg/9NBDvp4eb4YBAwZ4PnJ5MRRETftFQAQSCUg8J9LQ67QTYDZYrttpx64LioAIiEBWEQiWaFy127Zt6ymuENFVq1b1tdC1atVyi/T777+/JcWVLNFZ1cRpKywC+sADD7QHHnjAGjRoYMOHD7devXrZTz/9pMmXtLWCLiQC2UtA4jl72y7rSy637axvQlVABERABNJKINESTWCxRx991EUQgcVYC02e6ODOjRValui0Nk/WXIw0VngvsJ6+TZs2dv/999vll1/uwcXwYNCkftY0pQoqAmknIPGcduS6YCAgt+1AQs8iIAIiIAJFIRAs0RUqVPBcvg8//LCL6P3339/duWvWrOkW6URLtH5zikI494/dsGGDeynce++9LpynTp1qnTp1sm+//daD0eU+AdVQBESgOAQknotDTd9JGgHN7iYNpU4kAiIgArEjkGiJDu7cDz74oLvlsiYaEc2a1rAmGquiRHTsbpMCK/zzzz97tO0hQ4bYNddc42vqicT9xRdfuIDWGKVAdPpABGJLQOI5tk2f2YozeOGhH6bMtoOuLgIiIAK5QABLNPl8cdNu3bq1zZ071xDRROcePHiwnXnmme7O/d57721JcSURnQstX/I6IKC5f3D3J/jckiVLPMI7Ey6VKlUq+QV0BhEQgZwiIPGcU82ZXZUJ4lkCOrvaTaUVAREQgagS2LRpk+eJJnIyIvqxxx6ziRMn2mGHHWa33nqrEVjsH//4h33wwQdbonNLREe1NdNTLtqf+4bH1VdfbXfccYetXr3aGjdubK+++qq7duseSU9b6CoikA0EJJ6zoZVURhEQAREQAREQgUITwJL4ww8/GCK6VatWNnv2bJs8ebJV3Ryd+7bbbvMUV9dff73JEl1opDl/IOL5l19+8fXPI0eOtDfffNNatGhhTz31lHsrSEDn/C2gCopAoQhIPBcKkw5KBQF+iGR1TgVZnVMEREAERAACwRKNOzdCiDzRuHP/9a9/dXfu2rVruyX6X//6lyzRumXcfRs3bgKHkcrq008/9fvmiSeecAFdqlQpURIBEYg5AYnnmN8Aqr4IiIAIiIAI5DqBIKLLlCnjqYnmzJljRFc+6KCD3BJdo0YNu+666+zdd981IngjtmVpzPW7Iv/64bVAzmfc/nH5J61Vs2bNbMaMGT7BIgGdPzftFYG4EJB4jktLR6yeDEq22247+/333yNWMhVHBERABEQgVwmEwGK4c19wwQU2f/58mzRpkh111FFGxGXWRF977bUuoonMzXH8VmmLFwHGJj/++KOve541a5ZVqVLFOnbs6F4LTKxsv/328QKi2oqACGwhoF+ELSj0QgREQAREQAREIA4EsEQjjnbYYYcta6KnTZtm1apV84BRWKL79+/va6IR0Ty0xYtAENBnn322TZ8+3Q4++GB352Y9NB4MEtDxuh9UWxEIBCSeAwk9i4AIiIAIiIAIxIpAoiW6adOmnuJqypQpduSRR9rtt99uCKd+/frZ22+/7VGXZYmO1e3hcVkIPHfccce523b16tWtZ8+eNnToUJ94KV26dLyAqLYiIAIm8aybIGMEcN1mZldBwzLWBLqwCIiACIjAZgLBEo01kcBi8+bN8zXRRxxxhAulM844w/r27evu3AhoWaLjddvgpUC6M6K216xZ0137b775ZmP9M94LGsfE635QbeNNQOI53u2f0dorGEtG8eviIiACIiACeQj89ttvtn79enfLZU00YgmXXSzRd955p5111lluiSaNUcWKFbUmOg+/XH6LBXrvvff2KNz169e3QYMGeaR26syEijYREIF4EJB4jkc7R6qWYYYW8RxeR6qAKowIiIAIiECsCSRaonHnxhKNiP773/9uw4YNc+vj1VdfvcUSTYRubblPAAG9++672/jx4z3gHPdC7969jfRWEtC53/6qoQhAQOJZ90FGCUg8ZxS/Li4CIiACIrAVAliiEUy45iKiZ86c6Q/cuYcPH264c19zzTX2+uuvyxK9FY658hGT/qSu2mmnnWzUqFHWoUMHGz16tHXu3Nn+85//yJ0/Vxpa9RCBrRCQeN4KHH2UOgL8AMltO3V8dWYREAEREIHkEQh5olkTff7557slmry/BJJCRJPiCgvkO++84zmisUTrNy55/KN0Jtp1w4YNng8cy3PXrl2NvOEXXXSRffLJJ7bjjjtGqbgqiwiIQJIJSDwnGahOVzQCsjwXjZeOFgEREAERyByBYIlGRDdp0sRduR966CHPEz1ixAg7/fTTPbDYa6+95iKKnMAS0Zlrr1ReGVdtPBKIyk4wucWLF1u7du3srbfe8rZXu6eSvs4tApkjIPGcOfaxvzI/LBLP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v8YjUjlu3B06dLDp06e7lb5t27a2YMECF9C4d2sTgVwnoLs811s4gvULYlmzlBFsHBVJBERABERABGJCgPFIcOc++OCD3RK9ZMkSu/rqq+3FF1801vY2bNjQA2X98ssvLhDjbolGQGO5J/XXzJkzPaAYkw24vGOBloCOyT9PjKsp8Rzjxo9K1YOYjkp5VA4REAEREAEREIH4EGAcgkU1BBa76aabPDDWlVdeae+8846v72VNNGIxBBaLs4jG/R1WZ599tjPZbbfdrH379p7OCgFdqlSp+Nw8qmnsCEg8x67Jo1FhrM6anYxGW6gUIiACIiACIiACZomW6AMPPNBuu+02W7ZsmVuiX3nllS2WaEQ0lug4BxaD1bp16+zEE0+0+fPn+xryTp062ejRoz2NVZwnF/S/lNsEJJ5zu32zonZ0wHLhzoqmUiFFQAREQAREIOcJBEv0+vXrjTzRWKJXrlzpgcXeffddF9EEywoiGmtrXMUijI488kibPHmyHXXUUdajRw+PyA0PckRrE4FcIyDxnGstmkX1CYKZHyltIiACIiACIiACIhA1AqyJJrjYAQccYIMHD/bo0tdcc4299dZbRrCsBg0aePCssCY6joIxuLtPmzbNatSoYfAZOHCgp7cqU6ZM1JpU5RGBEhGQeC4RPn25JASCeC7JOfRdERABERABERABEUglAdb4Io6xsh5yyCF24403uoju27evr4lu166dp7giAjVCO44prohcXrVqVZs4caLVqVPHc2n37t3beZQtWzaVzaNzi0BaCUg8pxW3LpYfAVme86OifSIgAiIgAiIgAlEjEKJzY4kO7tyI6H/9618WRPTUqVM9ABlronfYYYeoVSFl5SEK9x577GHjx4/3aNzjxo2zrl272nfffWflypVL2XV1YhFIJwGJ53TS1rX+QECW5z/g0BsREAEREAEREIEsIIAlOkTnJsXVoEGDbOnSpdavXz93577wwgutUaNG7s6NoIyTJRrL+6677mpjx461Ll262OzZs61z58729ddfeyCxLGheFVEEtkpA4nmrePRhqggkCmd+hLSJgAiIgAiIgAiIQLYRQCwikLFEs8539erVvub3448/NkQ0+ZAnTZq0xRIdhzXRMMHSTLRycmYvWLDA14d/9NFHHqE829pY5RWBRAISz4k09DqtBBIFdFovrIuJgAiIgAiIgAiIQJIIhOjcrPtFRGOJXrJkifXv39+Izn3RRRfZueeea7hzB0t0roto1ogTcZv14bfccotPKhBgDR5EJ9cmAtlKQOI5W1suB8ot8ZwDjagqiIAIiIAIiIAIbCGAO3cInnXdddfZqlWr7Nprr7XPP//cOnToYE2aNPGgWlhnEZG5LKI3btxomzZtsj59+ti9995rL7zwgrVu3dpee+01d2XfAk0vRCCLCEg8Z1Fj5WpR5badqy2reomACIiACIhA/AgESzRW5v3339+tr4sXL7YBAwZ4YLGLL77Y6tWr57mREdq5LKJ//fVXt7Z369bNRo8eba+88oqRI/v555+3ypUrmwwp8fv/yPYaSzxnewtmcfnVYWZx46noIiACIiACIiACWyUQRDR5kHHnxo175cqV9o9//MO+/PJLd+dmTTTpnYjiHUR0ro2PfvvtN7fGt2/f3icMCB7WvHlzT/dFnbfbTnJkqzeSPowUAd2tkWqOeBUm/DgoVVW82l21FQEREAEREIE4EWCcg5s2Annfffe1G264wbBE49ZNYLGOHTu6JRoRjbU6F1NcBQHdokULD6BGzmws0HPnzvUo3KVKlYrTLaG6ZjEBiecsbjwVXQREQAREQAREQAREIDsIIKIJpJVoiV6+fLmL6K+++spFNCmuHnzwQbfUhhRXwdiQHbUsuJQs06PuDRo08OBprPcmNzb1LVu2rAcYK/jb+kQEokFA4jka7RDLUoQfA1meY9n8qrQIiIAIiIAIxJZASHG1zz77uHgmT/T111/vgcU6derklugHHnjALdEVKlSwHXbYISdYMeZjnXetWrU8B/R+++1nXbt2tXvuuceDpyGoNS7MiabO2UpIPOds02ZPxdRJZk9bqaQiIAIiIAIiIALJIcD4B0s0LswEFmMtNCIat27WRCOisdIiorHYBkt0cq6eubMEAX3KKae4BfqII46w3r1725AhQ3z9c65MFGSOsK6cSgISz6mkq3NvlUCwPG/1IH0oAiIgAiIgAiIgAjlOINESjYhesWKFW6K/+eYb69Kli9WvX98mTJjg66ZzYU10ENBHHXWUzZgxw2rUqOGTBuSFZnxYpkwZWaBz/J7P1upJPGdry+VQuWV5zqHGVFVEQAREQAREQASKRSBYorEy486MiCawGIKSNdGIaFJcYYnGWk2qp+23375Y14rCl4KAJhL51KlTrXHjxm59vuaaa4wUV+XKlZOAjkJDqQx/ICDx/AccepNOAsHyLPGcTuq6lgiIgAiIgAiIQNQJJFqi+/Xr5ymuBg4caN99952LaNy5x4wZkxOWaCKM77777jZu3Dhr1aqVr3/u2bOn/fzzz1a+fHkJ6KjfrDErn8RzzBo8itWVeI5iq6hMIiACIiACIiACmSSQaInee++97dprr7WFCxfazTff7Jbo7t27W506dez++++3devW+ZpoAm5l44aAJjDayJEjrXPnzl6nSy+91IOLsV9jxWxs1dwss8RzbrZrVtQqWJ6zorAqpAiIgAiIgAiIgAhkiABWWKJUE5376quvdks07ty4eBOtumHDhm6J5n3FihWzLjo3Y0LyYLPWeejQoXbFFVe4K/eFF17oEwUIaG0iEAUCEs9RaIWYl0GziTG/AVR9ERABERABERCBbRIIlmhE9J577mm4cz/xxBNuif7222+tR48eds4559j48ePt+++/d0t0NkWuRkDjrl6qVCmvE2ufH3/8cUNAf/DBB0agNG0ikGkCEs+ZbgFdX644ugdEQAREQAREQAREoAgESHGVaIlevny53XTTTS4+u3XrZueee66NHj16i4jGnTsbPP4oI1Z2tuuuu87rtHLlSl8L/fLLL7tVPRvqUYSm1KFZRkDiOcsaLJeKq84vl1pTdREBERABERABEUgnASzRCE3WC++xxx6GpRZL9C233OKBxS655BKrXbu2u3MTnTtbUlwxPty4caNH3L7qqqvszjvvtJdeesmaNm1qa9as8XpoDJnOO03XSiQg8ZxIQ68zQkBu2xnBrouKgAiIgAiIgAjkAAHGUYhNBDKBxRCcS5cudRGNuMadmxRXWKITA4tFXYCSrop6MQlAjut///vfboEmfRcTAdttJxmTA7dv1lVBd13WNVnuFDh02hLPudOmqokIiIAIiIAIiEDmCCRaovv06eN5om+99VZ38SZ6NZboUaNGudBGgBKgK8obApo6tWvXziZNmuTW6BYtWtj8+fMloKPccDlcNonnHG5cVU0EREAEREAEREAERCBeBBIt0QQW6927t4vowYMH+5royy67zFNcYYkmb3TlypUtymuif/vtN3dNb9SokU2fPt1TWiGmec0EAAHGtIlAughIPKeLtK7zJwKyPP8JiXaIgAiIgAiIgAiIQNIIBEv0X/7yFxfRy5YtM0Q0AceCJfqee+6JvCX6999/97RcZ555pj3yyCN2wAEHWMeOHd2dmzRWEtBJu2V0om0QkHjeBiB9nHoCcttOPWNdQQREQAREQAREIJ4EgiWaHNCI6CuvvNIDi91+++2eW5mcyrVq1bL77rvP/vOf/9hOO+0USUs09WBdd/Xq1T0H9GGHHWZdunQxxD8Cevvtt49nA6vWaSUg8ZxW3LpYIoFgeU7cp9ciIAIiIAIiIAIiIAKpIYDFmejciOiePXvaihUrbMiQIZ42NLhzDx8+3FNcIUijuCaaHNZ/+9vfbMaMGXbSSSd5PW677TYX/NmU1zo1LayzppqAxHOqCev82yQgy/M2EekAERABERABERABEUgKgURLdJUqVdwSvWDBAk8JtWHDBn9/9tlne2AxIlyHNdFJuXiSToIV/aCDDrLJkydbzZo17dprr7X+/fsb66OjKPiTVG2dJgIEJJ4j0Ai5XgQszHkf1DnR8sxaFVIOJD5ynYvqJwIiIAIiIAIiIAKZJIAl+scffzRENGugly9fblhxGZfhzl23bl2766673BJdsWLFSAlTyr3vvvv6umdScQ0dOtR69erl9SlXrlwmseraOUxA4jmHGzcqVSPNAFEciYgYHpStbNmyXkRcbPicji48ENYEh9AmAiIgAiIgAiIgAiKQOgLBEo0Y3W233f5giUZcs0aaQF333nuv51rGEh0V9+jggn7//fdby5YtXUiTFxqLefny5VMHTWeOLYH/Z3NggP83trVXxVNOAEsyHe/MmTPtww8/9GT3waXmlVdesaVLl3qQimrVqvlnBHvggStO69atvXPmeG0iIAIiIAIiIAIiIAKpJ4ABIxg2vvjiCx/DIU7feOMNO/zww61Tp07WrFkz22uvvTwH86ZNm3zNdOpLVvAVMMggpHHdJgXXWWedZePGjXPLNJMC2kQgWQQknpNFUufJlwAdMB0aQSnozLAw4woUBDSWaDo1Ol72k1IBizNuN0SBZE2L1kTni1Y7RUAEREAEREAERCClBBDRjOM+/fRTmzdvno0cOdLeeecdO/DAA93Nu2nTprb33nu7oQRjSSY3ysoY8uabb/YgaKeeeqqNHz/eyyoBncmWya1rSzznVntGsja4zazYHM2RdTMDBw70tAIbN270soZ1z1iocdkeNGiQ3X333fbwww9b7dq1XVhHslIqlAiIgAiIgAiIgAjEhABBuDCAfPnllzZr1iwbO3asvfnmm3booYda165d7YILLrB99tnHCDiWSUt0MNKQvqpPnz527LHHuis30blJc6VNBEpKQOK5pAT1/W0SoMP95ptv7JxzzvG1NE8++WS+32FtNGtqmN385z//KZftfClppwiIgAiIgAiIgAiknwAGD5bWYez47LPPbM6cOe5V+NZbb7l1l7XGiGjcuRHQeBNmYgtlxOrcrVs3F/hE5UZIk+ZKmwiUhIAChpWEnr5bKAJ0oHvuuaevP3nmmWfstddey/d7r7/+ur3wwgtGxMRKlSopYFi+lLRTBERABERABERABNJPgGV0jOmw4BJYjOjcixYt8mjcWHx79+5tpLgiOvfXX39tO+20k1urg5dhukqMMeann36yzp0728SJE90o06pVK2MMSpnSXZ501VvXSQ8Bief0cI71VVh/wiwgVmVeP/HEE/nyWLNmjbv74N5NB621zvli0k4REAEREAEREAERyCiBkOJq5513th49etiSJUts+PDhbpW+6qqrXETfcccdtjkwsVWoUGFLhpV0FZrYOsTNadOmjQvob7/91s4//3xbvHixG2hYLqhNBIpDQG7bxaGm7xSZADOSpA048cQT7cgjj7THH3/cBXXiiXDrZv0MOQYJPpEpd5/EMum1CIiACIiACIiACIjA1gmwRI+AXayJnj9/vo0YMcIDi1WtWtXFNe7cvCYiNpbhdBlIEMnkp16wYIG1a9fOK0EAW4Q067OV0WXr7apP/0xA0y5/ZqI9KSBAR8kaGKzPa9eutffee+8PV2Gd86pVq+z00093F2/cgrSJgAiIgAiIgAiIgAhEn0CiJZoAYhhCcN9mGR6BuwgCO2TIEPvuu+/SaonG4xE3c7waZ8+e7UK6ffv29sADD7g1HM9IbSJQFAISz0WhpWOLTYAZRmb3GjZs6MEann766T+cizUzdLyIa6JzaybwD3j0RgREQAREQAREQAQiTYCxHtlUcJeuXLmyEUDs0UcftVGjRrm3Yb9+/axGjRru3o2FOqyJTnWlKBepqjDQTJ061Y05Xbp08XLgGclDmwgUloDEc2FJ6bgSE6DzOv74422XXXbxzjTxhLhx09Hi1i137UQyei0CIiACIiACIiAC2UUgiGjGfB07drRly5a5KzdrpLFE16pVy2699VZf0odbNbmkU7kFAX3SSSe5Bbp69erWt29fzwmNazdu59pEoDAEtOa5MJR0TFII4BqD+8zFF19sCxcutA8++MB23313+/zzz11UH3744fbYY4/5GhQ6OW0iIAIiIAIiIAIiIALZTwDrLimuvvjiCx/r4dJNnBtyQ1922WXWtGlTT3dFlGyEdyq3HXfc0cegWMYJdNarVy8bOHCglSpVyg04isadSvrZf25ZnrO/DbOmBqx7Zu0LrtkEjFi6dKmXnTXQCOj69et7+gAJ56xpUhVUBERABERABERABLZJIKS4wvKMEQVL9D333ONGFCzAWKJvueUWT3GFJRpLcKpELC7cBC+7//777bzzzrNhw4YZEcIR7Qh8bSKwNQISz1ujo8+SToB1zSeffLKva8bKzIaIxmWG3IBa65x05DqhCIiACIiACIiACESCAAIV8Yr1t3v37vbII4/Yfffd50HE+vfv72uiSXGFhTqV7twYcchVjYDu0KGDjRkzxnr27On5oRHQMuRE4naJZCHkth3JZsndQiGScd2pV6+effbZZ56yqkGDBj7zOHfuXJ/xU6Tt3G1/1UwEREAEREAEREAEAgHSW/EgD/O8efNs7Nix9uKLL9p+++1nnTp1statW7uVGOMLwjuZopZzIZQZdxLMbOTIkda4cWMX8wQzw4U8vw33bqzieFRqix+BUptdJW6IX7VV40wRCB0VOZ8feugh77SwQJM2oE6dOgoWlqmG0XVFQAREQAREQAREIM0E8DgM7tIE88KN+tBDD7VXX33Vpk+f7mNFhPP+++9vVapUcU/FZIlWBDDCGaMOqbQIWIsl+vXXX7ezzjrLA9wmGnQYwyL0KQ85onEtT6aYTzN6Xa6YBCSeiwlOXys+AazPFSpUsMmTJ9s777zjnc8VV1zhgSLokLSJgAiIgAiIgAiIgAjEhwABZRkDMj487rjjrEmTJi6i33rrLU8vNWfOHI+Xg4jeY489XLTynZJuwYJMUNuaNWt6Sq1x48YZ8XhOOeUU23PPPV1gB+GMeMa9nCwxpF9lvwR0SVshu74v8Zxd7ZUzpWWty7PPPuszi0cccYRHOqQDS0ZHmDOQVBEREAEREAEREAERiBEBLNFYe0ldRfrS888/30U0kbmxRM+ePdvXTB944IG+5A8X6pJaohl/cl2ezzjjDBfwWKBXrlxpJ5xwglu9EchYmocMGWKDBw+21157zU499VQ77LDDUh4dPEbNnxVVlXjOimbKrULSARF1mzXPy5cvtwsuuMA7R1xgtImACIiACIiACIiACMSbQLBEly9f3tOZIqKrVavmRpeZM2farFmz3M2aVFd77bVXUizRIWhtjRo17C9/+YtNmTLFg9qSExpXctJrsTYa1/L169f72uxmzZq527eMP/G5XyWe49PWkaops3e45yxYsMDz+x100EElnjmMVAVVGBEQAREQAREQAREQgRIRSLRE486NWEXIvvfeey5uCTb73XffGePI3Xff3d2ui2uJDh6QGHlYf33AAQe4pZuI4B9//LGn0mItNMsOOXbixIlWdXPKK6zTrNvWFg8CirYdj3aOTC3pbNhYW7Ju3TpPSt+7d2+PqpjY8Wj9SGSaTAURAREQAREQAREQgUgQILgXEbK/+eYbe+KJJ+zOO+90azTC+ZJLLrEWLVq4uCb4V0micxOfh1RZjz76qLVr184tzQhq1l6zDhrBfvzxxxtu44sXL/5TcLFIwFIhUkJAlueUYNVJAwHEMh0dARboiMKGewvrnumY6IT4nI3jEdZ8JxwvIR2o6VkEREAEREAEREAE4ksguHMjoP/+979vEcsffPDBFkv0f/7zHw9CGyzRwR27sNSCoQcvSdZaY3nG2o1wxk2cjetXrlzZxo8f72uklTGmsHSz/zhZnrO/DSNZA2bi6HSY9SMt1ffff29ff/21PwgEwVoRZgXJoYdwphMiOATfIRUB0RQR16yNZr0LHR9uOBLSkWxuFUoEREAEREAEREAE0k4AgwsRuhljLlq0yC3RL7/8su2666526aWXWvPmzT2oF0sFC2uJZlzK2BPLNm7iO++8s5FW9aijjvpD/TgnbtxEBOfafP7f//73D8foTe4RkHjOvTbNWI2C1RiLMYKZzuT99983ZgO//PJLF8DBmkwhOZ73IchCEMa8pzMkFQGzhszyMbu49957+7EI6fCdjFVWFxYBERCBHCBAPxysLPTBoR/OgaqpCiIgAjEigMciBhiMNQ8//LBbhJ966in3bsTt+qKLLnJrNONHjDf59XVhHIurNmNNgoMxTn3ooYfcRTs/nETkPvPMM61t27Y2ZswYF+gao+ZHKnf2STznTltmtCZYmhG8iOQ33njD6LA+//xzTyKPazZWZKzLiGFm9OjksDTzTAfF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ErAQoPJsgcFdEiABEiABEiABEiABEiABEiABErBHgMqzPSrMIwESIAESIAESIAESIAESIAESIAELASrPFhjcJQESIAESIAESIAESIAESIAESIAF7BKg826PCPBIgARIgARIgARIgARIgARIgARKwEKDybIHBXRIgARIgARIgARIgARIgARIgARKwR4DKsz0qzCMBEiABEiABEiABEiABEiABEiABCwEqzxYY3CUBEiABEiABEiABEiABEiABEiABewSoPNujwjwSIAESIAESIAESIAESIAESIAESsBCg8myBwV0SIAESIAESIAESIAESIAESIAESsEeAyrM9KswjARIgARIgARIgARIgARIgARIgAQsBKs8WGNwlARIgARIgARIgARIgARIgARIgAXsEqDzbo8I8EiABEiABEiABEiABEiABEiABErAQoPJsgcFdEiABEiABEiABEiABEiABEiABErBHgMqzPSrMIwESIAESIAESIAESIAESIAESIAELASrPFhjcJQESIAESIAESIAESIAESIAESIAF7BKg826PCPBIgARIgARIgARIgARIgARIgARKwEKDybIHBXRIgARIgARIgARIgARIgARIgARKwR4DKsz0qzCMBEiABEiABEiABEiABEiABEiABCwEqzxYY3CUBEiABEiABEiABEiABEiABEiABewSoPNujwjwSIAESIAESIAESIAESIAESIAESsBCg8myBwV0SIAESIAESIAESIAESIAESIAESsEeAyrM9KswjARIgARIgARIgARIgARIgARIgAQsBKs8WGNwlARIgARIgARIgARIgARIgARIgAXsEqDzbo8I8EiABEiABEiABEiABEiABEiABErAQoPJsgcFdEiABEiABEiABEiABEiABEiABErBHgMqzPSrMIwESIAESIAESIAESIAESIAESIAELASrPFhjcJQESIAESIAESIAESIAESIAESIAF7BKg826PCPBIgARIgARIgARIgARIgARIgARKwEKDybIHBXRIgARIgARIgARIgARIgARIgARKwR4DKsz0qzCMBEiABEiABEiABEiABEiABEiABCwEqzxYY3CUBEiABEiABEiABEiABEiABEiABewSoPNujwjwSIAESIAESIAESIAESIAESIAESsBCg8myBwV0SIAESIAESIAESIAESIAESIAESsEeAyrM9KswjARIgARIgARIgARIgARIgARIgAQsBKs8WGNwlARIgARIgARIgARIgARIgARIgAXsEqDzbo8I8EiABEiABEiABEiABEiABEiABErAQoPJsgcFdEiABEiABEiABEiABEiABEiABErBHgMqzPSrMIwESIAESIAESIAESIAESIAESIAELASrPFhjcJQESIAESIAESIAESIAESIAESIAF7BKg826PCPBIgARIgARIgARIgARIgARIgARKwEKDybIHBXRIgARIgARIgARIgARIgARIgARKwR4DKsz0qzCMBEiABEiABEiABEiABEiABEiABCwEqzxYY3CUBEiABEiABEiABEiABEiABEiABewSoPNujwjwSIAESIAESIAESIAESIAESIAESsBCg8myBwV0SIAESIAESIAESIAESIAESIAESsEeAyrM9KswjARIgARIgARIgARIgARIgARIgAQsBKs8WGNwlARIgARIgARIgARIgARIgARIgAXsEqDzbo8I8EiABEiABEiABEiABEiABEiABErAQoPJsgcFdEiABEiABEiABEiABEiABEiABErBHgMqzPSrMIwESIAESIAESIAESIAESIAESIAELASrPFhjcJQESIAESIAESIAESIAESIAESIAF7BKg826PCPBIgARIgARIgARIgARIgARIgARKwEKDybIHBXRIgARIgARIgARIgARIgARIgARKwR4DKsz0qzCMBEiABEiABEiABEiABEiABEiABCwEqzxYY3CUBEiABEiABEiABEiABEiABEiABewSoPNujwjwSIAESIAESIAESIAESIAESIAESsBCg8myBwV0SIAESIAESIAESIAESIAESIAESsEeAyrM9KswjARIgARIgARIgARIgARIgARIgAQsBKs8WGNwlARIgARIgARIgARIgARIgARIgAXsEqDzbo8I8EiABEiABEiABEiABEiABEiABErAQoPJsgcFdEiABEiABEiABEiABEiABEiABErBHgMqzPSrMIwESIAESIAESIAESIAESIAESIAELASrPFhjcJQESIAESIAESIAESIAESIAESIAF7BKg826PCPBIgARIgARIgARIgARIgARIgARKwEKDybIHBXRIgARIgARIgARIgARIgARIgARKwR4DKsz0qzCMBEiABEiABEiABEiABEiABEiABCwEqzxYY3CUBEiABEiABEiABEiABEiABEiABewSoPNujwjwSIAESIAESIAESIAESIAESIAESsBCg8myBwV0SIAESIAESIAESIAESIAESIAESsEeAyrM9KswjARIgARIgARIgARIgARIgARIgAQsBKs8WGNwlARIgARIgARIgARIgARIgARIgAXsEqDzbo8I8EiABEiABEiABEiABEiABEiABErAQ+D9Kr5ZZSqFkEwAAAABJRU5ErkJggg==)
+
+The causal diagram implies that identification relies on using the cutoff in BAC to generate quasi-random variation in punishment severity among drivers near the threshold. While demographic and behavioral characteristics affect both BAC and future recidivism, these factors are expected to vary smoothly through the cutoff.
+
+As a result, comparisons of drivers just above and just below the 0.08 threshold isolate variation in punishment that is plausibly exogenous. This means that controls are not required for identification in the primary regression discontinuity specification. Instead, the design achieves identification through local comparability. Observable covariates are used later only as diagnostic checks and to improve precision, rather than to solve confounding.
+
+## 5. Identification Assumptions
+
+The validity of the regression discontinuity design relies on several key assumptions:
+
+1.  Continuity\
+    In the absence of treatment, recidivism would vary smoothly with BAC around the 0.08 cutoff. Any discontinuity at the threshold can therefore be attributed to the change in punishment severity.
+
+2.  No Manipulation\
+    Drivers should not be able to precisely manipulate their BAC to fall just below the threshold. I assess this by examining the density of observations around the cutoff.
+
+3.  Covariate Balance\
+    Observable characteristics such as age, gender, and race should not change discontinuously at the cutoff. I test this by examining whether these variables are balanced around 0.08.
+
+Taken together, these checks support the credibility of the RD design and strengthen the causal interpretation of the estimated treatment effect.
+
+## **6. Empirical Strategy**
+
+To estimate the causal effect of harsher DUI penalties on recidivism, we implement a regression discontinuity design (RDD) centered at the 0.08 BAC legal threshold. Treatment assignment is determined by whether a driver’s BAC exceeds this cutoff, creating a discontinuous change in punishment severity.\
+
+\
+We estimate a local linear regression of the following form:
+
+The empirical specification is:
+
+where BACi∗=BACi−0.08BACi∗​=BACi​−0.08 denotes the running variable centered at the cutoff, and Treati​ is an indicator equal to one if the driver’s BAC exceeds the legal threshold.
+
+We use a local linear specification because it balances bias and variance near the cutoff and avoids the instability associated with higher-order polynomials. Observations are weighted using a triangular kernel, which assigns greater weight to observations closer to the threshold, reflecting the local nature of identification in regression discontinuity designs.
+
+We do not include control variables in the baseline specification. As shown in the causal framework, identification comes from the discontinuity in treatment assignment at the cutoff rather than from conditioning on covariates. Control variables are included later only as robustness checks and to improve precision.
+
+Standard errors are computed using heteroskedasticity-robust estimators to account for potential variation in error variance across BAC levels, ensuring valid statistical inference.
+
+The choice of bandwidth determines the set of observations used for estimation and reflects a trade-off between bias and variance. We begin with a baseline bandwidth selected using the data-driven procedure implemented in *rdrobust,* which minimizes mean squared error and reflects best practice in modern regression discontinuity applications, and evaluate the sensitivity of the results to alternative bandwidth choices in subsequent analyses.
+
+## 7. Function for Local RDD Estimation
+
+To implement the regression discontinuity design, we construct a set of functions in R that estimate local linear models and generate binned visualizations of the outcome variable around the cutoff.
+
+The estimation procedure applies a triangular kernel weighting scheme, which assigns greater weight to observations closer to the threshold. This reflects the local nature of identification in regression discontinuity designs, where observations near the cutoff are most informative for estimating the treatment effect.
+
+We estimate the model using a local linear specification with an interaction between the treatment indicator and the running variable, allowing for different slopes on either side of the cutoff. This specification is consistent with best practices in the RDD literature and aligns with our empirical strategy.
+
+In addition to estimation, we construct binned averages of the outcome variable to provide a visual representation of the discontinuity at the threshold. These visualizations complement the regression results and allow us to assess the presence and magnitude of any discontinuity in a transparent way.
+
+The code below implements these procedures and ensures consistency across estimation and visualization.
+
+```{r}
+
+tri_kernel <- function(x, h) {
+  pmax(1 - abs(x / h), 0)
+}
+
+make_rd_bins <- function(data, running, outcome, h, n_bins = 40) {
+  data %>%
+    filter(!is.na(.data[[running]]), !is.na(.data[[outcome]])) %>%
+    filter(abs(.data[[running]]) <= h) %>%
+    mutate(
+      bin = cut(
+        .data[[running]],
+        breaks = c(
+          seq(-h, 0, length.out = n_bins / 2 + 1),
+          seq(0, h, length.out = n_bins / 2 + 1)[-1]
+        ),
+        include.lowest = TRUE,
+        right = FALSE
+      )
+    ) %>%
+    group_by(bin) %>%
+    summarise(
+      x = mean(.data[[running]], na.rm = TRUE),
+      y = mean(.data[[outcome]], na.rm = TRUE),
+      n = n(),
+      .groups = "drop"
+    )
+}
+
+plot_rd_bins <- function(data, running, outcome, h, title, ylab) {
+  binned <- make_rd_bins(data, running, outcome, h)
+
+  ggplot(binned, aes(x = x, y = y)) +
+    geom_point(color = "steelblue", size = 2) +
+    geom_line(color = "steelblue") +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "red", linewidth = 1) +
+    labs(
+      title = title,
+      x = "BAC Relative to 0.08 Cutoff",
+      y = ylab
+    ) +
+    theme_minimal()
+}
+
+run_local_rd <- function(data, outcome, running, h, controls = NULL) {
+  tmp <- data %>%
+    filter(!is.na(.data[[running]]), !is.na(.data[[outcome]])) %>%
+    filter(abs(.data[[running]]) <= h) %>%
+    mutate(
+      run = .data[[running]],
+      treat = if_else(run >= 0, 1, 0),
+      w = tri_kernel(run, h)
+    )
+
+  rhs <- "treat + run + treat:run"
+
+  if (!is.null(controls) && length(controls) > 0) {
+    rhs <- paste(rhs, paste(controls, collapse = " + "), sep = " + ")
+  }
+
+  fml <- as.formula(paste(outcome, "~", rhs))
+
+  model <- feols(
+    fml,
+    data = tmp,
+    weights = ~w,
+    vcov = "hetero"
+  )
+
+  list(model = model, data = tmp)
+}
+```
+
+# 8a.Graph the outcome discontinuity at `.08`
+
+We begin by examining the relationship between BAC and recidivism around the 0.08 cutoff using binned averages of the outcome variable.
+
+The graph shows a **clear discontinuity at the threshold**. Specifically, the mean recidivism rate drops noticeably when moving from just below the cutoff to just above it. Drivers with BAC levels slightly below 0.08 exhibit recidivism rates of approximately **11–13%**, while those just above the threshold have lower rates, generally around **9–10%**.
+
+We examine this graph because, under the regression discontinuity framework, a discontinuity in the outcome at the cutoff is interpreted as evidence of a treatment effect. In this context, the treatment corresponds to the harsher punishment regime triggered when BAC exceeds 0.08.
+
+The observed drop in recidivism at the threshold is consistent with a negative treatment effect, suggesting that harsher punishments reduce the likelihood of future DUI offenses for drivers near the cutoff.
+
+Importantly, the comparison is local. The graph focuses on observations within a narrow bandwidth around the threshold, which supports the assumption that drivers on either side of the cutoff are similar in both observed and unobserved characteristics. Under this assumption, the discontinuity can be interpreted as reflecting the causal effect of increased punishment severity rather than differences in underlying driver behavior.
+
+However, while the graphical evidence is informative and strongly suggestive of a deterrent effect, it is not sufficient for precise estimation or statistical inference. We therefore complement this visual analysis with formal regression discontinuity estimates in the next section.
+
+```{r}
+
+dwi <- dwi %>%
+  mutate(bac_c_08 = bac1 - 0.08)
+```
+
+```{r}
+#| label: outcome-plots
+
+h_plot_08 <- 0.03
+
+plot_rd_bins(
+  dwi,
+  running = "bac_c_08",
+  outcome = "recidivism",
+  h = h_plot_08,
+  title = "Recidivism Around the 0.08 BAC Cutoff",
+  ylab = "Mean Recidivism Rate"
+)
+```
+
+# 8b. RD plot with fitted lines (visualizing the discontinuity)
+
+The fitted lines reveal a clear downward jump in recidivism at the threshold. Specifically, the predicted probability of future DUI offenses is lower immediately to the right of the cutoff than to the left, indicating that drivers just above the legal limit are less likely to reoffend. This provides evidence of a deterrence effect.
+
+The fitted lines represent local linear approximations to the conditional expectation of recidivism on either side of the threshold, allowing us to isolate the discontinuity while accounting for smooth trends in BAC. The slopes appear smooth on both sides, supporting the use of a local linear specification.
+
+Importantly, the discontinuity occurs precisely at the cutoff and not elsewhere in the distribution, reinforcing the interpretation that the observed jump is driven by the change in punishment severity rather than underlying differences in driver characteristics.
+
+Taken together, this figure provides strong visual evidence of a negative treatment effect which, under the assumptions of the regression discontinuity design, can be interpreted as the causal effect of harsher DUI penalties on recidivism for drivers near the threshold.
+
+```{r}
+# 6b. RD plot with fitted lines (visualizing the discontinuity)
+
+rdplot(
+  y = dwi$recidivism,
+  x = dwi$bac_c_08,
+  c = 0,
+  p = 1,
+  kernel = "triangular",
+  x.label = "BAC relative to 0.08 cutoff",
+  y.label = "Recidivism rate",
+  title = "Regression Discontinuity Plot at the 0.08 BAC Threshold"
+)
+```
+
+# 9. Manipulation / density test
+
+We assess potential manipulation of the running variable (blood alcohol concentration, BAC) around the policy thresholds using the McCrary density test, implemented via local polynomial density estimation. This test is critical because the validity of the regression discontinuity (RD) design depends on the assumption that individuals cannot precisely sort around the cutoff. If drivers were able to manipulate their BAC to fall just below the legal threshold, comparisons across the cutoff would be invalid and causal inference would be compromised. At the 0.08 cutoff, the estimated test statistic is −0.1387 with a p-value of 0.8897, indicating that we fail to reject the null hypothesis of continuity in the density of BAC. Similarly, at the 0.15 cutoff, the test statistic is −0.7358 with a p-value of 0.4618, again providing no evidence of a discontinuity. These results suggest that the distribution of BAC is smooth around both thresholds, implying no statistically significant manipulation or sorting behavior. Although binomial tests detect statistically significant differences in counts within very narrow windows, these findings are likely driven by the extremely large sample size, which can render even trivial differences statistically significant. As such, greater weight is placed on the McCrary test, which is specifically designed to detect discontinuities in the running variable. Taken together, the evidence strongly supports the no-manipulation assumption, reinforcing the credibility of the RD design. Consequently, observations near the cutoff can be treated as quasi-randomly assigned to treatment, supporting a causal interpretation of the estimated effects of harsher DUI penalties on recidivism.
+
+```{}
+```
+
+### **Graphical Evidence**
+
+The density plot shows the distribution of BAC around the 0.08 threshold. The estimated density appears **smooth through the cutoff**, with no visible discontinuity at 0.08. While the density increases as BAC rises, this reflects the overall distribution of observations rather than any sharp break at the threshold.
+
+Crucially, there is **no clear jump or drop exactly at the cutoff**, which would be indicative of manipulation. The continuity of the density supports the idea that drivers are not able to precisely control their BAC to avoid harsher penalties.
+
+### **Formal Test Results**
+
+The McCrary density test yields a test statistic of **-0.1387** with a p-value of **0.8897**. We therefore fail to reject the null hypothesis of continuity in the density of the running variable at the cutoff.
+
+This result confirms the graphical evidence that there is **no statistically significant discontinuity in the density at 0.08**.
+
+### **Interpretation and Implications**
+
+Taken together, both the graphical and statistical evidence indicate that there is **no meaningful manipulation of BAC around the cutoff**.
+
+This supports a key identifying assumption of the regression discontinuity design: that individuals just below and just above the threshold are comparable. As a result, variation in treatment assignment near the cutoff can be treated as quasi-random.
+
+This strengthens the credibility of our empirical strategy and supports a **causal interpretation** of the estimated effect of harsher punishments on recidivism.
+
+```{r}
+#| include: false
+
+dens_08 <- rddensity(X = dwi$bac1, c = 0.08)
+
+dens_plot <- rdplotdensity(
+  dens_08,
+  dwi$bac1,
+  xlab = "Blood Alcohol Content (BAC)",
+  ylab = "Estimated Density",
+  title = "Manipulation Test at the 0.08 BAC Threshold"
+)
+```
+
+```{r}
+#| fig-width: 10
+#| fig-height: 6
+#| fig-cap: "Density of BAC around the 0.08 legal threshold"
+
+dens_plot$Estplot +
+  geom_vline(xintercept = 0.08, linetype = "dashed", color = "red")
+```
+
+# 9a. Covariate continuity / placebo checks
+
+We test whether observable covariates are continuous at the 0.08 BAC cutoff by estimating local regression discontinuity models using each covariate as an outcome. This test is conducted because the validity of the RD design requires that individuals just below and just above the cutoff are similar in both observed and unobserved characteristics; if covariates exhibit discontinuities at the threshold, this would suggest that treatment is not as-good-as randomly assigned near the cutoff. Across all covariates examined (gender, race, age, and accident involvement), we find no statistically significant discontinuities at the cutoff, with estimates of −0.0089 (p = 0.337) for male, 0.0079 (p = 0.320) for white, −0.0220 (p = 0.933) for age, and −0.0004 (p = 0.956) for accident involvement, with all p-values well above conventional significance levels. These results indicate that we fail to reject the null hypothesis of continuity for each covariate, suggesting that observable characteristics are smooth through the cutoff and that there are no systematic differences in demographics or accident involvement between drivers just below and just above the threshold. Because these covariates are not affected by the treatment itself, they serve as placebo outcomes, and the absence of discontinuities supports the assumption that treatment assignment near the cutoff is effectively random. Taken together, the covariate continuity tests provide strong support for the internal validity of the regression discontinuity design; since both observable characteristics and the density of the running variable are continuous at the cutoff, we have no evidence of sorting or imbalance, which strengthens our ability to interpret the discontinuity in recidivism as a causal effect of harsher punishment rather than a reflection of underlying differences in driver characteristics.
+
+```{r}
+
+covariate_test <- function(data, outcome, running, h) {
+  out <- run_local_rd(data, outcome = outcome, running = running, h = h)
+  tidy(out$model) %>%
+    filter(term == "treat") %>%
+    mutate(variable = outcome)
+}
+
+h_cov_08 <- 0.02
+covars <- c("male", "white", "aged", "acc")
+
+cov_balance_08 <- map_dfr(
+  covars,
+  ~ covariate_test(dwi, .x, "bac_c_08", h_cov_08)
+)
+
+cov_balance_08
+```
+
+```{r}
+
+cov_balance_08 %>%
+  select(variable, estimate, std.error, p.value) %>%
+  rename(
+    Covariate = variable,
+    Estimate = estimate,
+    `Std. Error` = std.error,
+    `P-value` = p.value
+  ) %>%
+  kable(
+    caption = "Covariate Balance Around the 0.08 BAC Threshold",
+    digits = 3
+  )
+```
+
+The results in Table X show that all covariates are continuous at the 0.08 cutoff. The estimated discontinuities are small in magnitude and statistically insignificant across all variables. For example, the estimated effect at the cutoff is -0.009 for male (p = 0.337), 0.008 for white (p = 0.320), -0.022 for age (p = 0.933), and effectively zero for accident involvement (p = 0.956).
+
+We examine these covariates because they are predetermined characteristics that should not be affected by treatment. If we observed discontinuities in these variables, it would suggest that individuals just above and just below the cutoff are systematically different, violating the key identifying assumption of the regression discontinuity design.
+
+The absence of statistically significant discontinuities indicates that observable characteristics are balanced around the threshold. This supports the assumption that treatment assignment near the cutoff is effectively quasi-random.
+
+Taken together with the density test results, this provides strong evidence that our identification strategy is valid and that the estimated discontinuity in recidivism can be interpreted as a causal effect.
+
+# 9b. Co-variate continuity / placebo checks
+
+## First placebo graph (Age)
+
+We examine age as a placebo outcome to test whether observable characteristics are continuous at the cutoff.
+
+The graph shows that mean age evolves smoothly through the 0.08 threshold, with no visible discontinuity at the cutoff. While there is a gradual downward trend in age as BAC increases, there is no sharp jump exactly at the threshold.
+
+We examine age because it is a predetermined characteristic that cannot be affected by the treatment. If we observed a discontinuity in age at the cutoff, it would suggest that individuals just below and just above the threshold differ systematically, violating the identifying assumption of the regression discontinuity design.
+
+The absence of a discontinuity indicates that drivers on either side of the cutoff are similar in terms of age. This supports the assumption that treatment assignment near the threshold is effectively quasi-random.
+
+Taken together, this placebo test reinforces the validity of our empirical strategy and strengthens the causal interpretation of the estimated treatment effects.
+
+```{r}
+
+h_placebo <- 0.03
+
+plot_rd_bins(
+  dwi,
+  running = "bac_c_08",
+  outcome = "aged",
+  h = h_placebo,
+  title = "Age Around the 0.08 BAC Cutoff",
+  ylab = "Mean Age"
+)
+```
+
+## Second placebo graph (Male)
+
+### **Placebo Check: Male Indicator Around the 0.08 Cutoff**
+
+We examine the male indicator as a placebo outcome to assess whether demographic characteristics are continuous at the cutoff.
+
+The graph shows that the share of male drivers evolves smoothly through the 0.08 threshold, with no visible discontinuity at the cutoff. While there is some natural fluctuation in the proportion of male drivers across BAC levels, there is no sharp jump exactly at the threshold.
+
+We examine this variable because gender is a predetermined characteristic that cannot be affected by the treatment. If we observed a discontinuity at the cutoff, it would suggest that individuals just below and just above the threshold differ systematically, violating the identifying assumptions of the regression discontinuity design.
+
+The absence of any discontinuity indicates that drivers on either side of the cutoff are comparable in terms of gender composition. This supports the assumption that treatment assignment near the threshold is effectively quasi-random.
+
+Taken together with the other placebo checks, this provides further evidence that our identification strategy is valid and that the estimated effect of harsher punishment can be interpreted causally.
+
+```{r}
+
+plot_rd_bins(
+  dwi,
+  running = "bac_c_08",
+  outcome = "male",
+  h = h_placebo,
+  title = "Male Indicator Around the 0.08 BAC Cutoff",
+  ylab = "Share Male"
+)
+```
+
+# 10. Main Regression Results (Local RD Estimates Using Data-Driven Bandwidths)
+
+We estimate the causal effect of harsher DUI punishments on recidivism using a local linear regression discontinuity design with a data-driven bandwidth selected via rdrobust. This approach focuses on observations close to the cutoff, where the identifying assumptions of the RD design are most credible. A triangular kernel is employed to place greater weight on observations nearest to the threshold, while the optimal bandwidth **(h ≈ 0.031)** balances bias and variance in estimation. The estimated treatment effect at the cutoff is **−0.018,** indicating that crossing the **0.08** BAC threshold reduces the probability of future DUI recidivism by approximately 1.8 percentage points.  This estimate is statistically significant at the **5%** level (p = 0.012), and economically meaningful, representing a non-trivial reduction in repeat offending among marginal drivers. Interpreted narrowly, for drivers with BAC levels close to the legal limit, those just above the threshold are about **1.8** percentage points less likely to reoffend than those just below it. More broadly, this finding provides evidence that harsher DUI penalties have a deterrent effect on future drunk driving behavior among marginal offenders. Given that the estimate compares individuals immediately around the cutoff, and that prior density and covariate continuity tests support the validity of the RD assumptions, we interpret this result as a causal effect of harsher punishment on recidivism. However, this effect is local and applies specifically to drivers near the 0.08 threshold, and may not generalize to individuals with substantially higher levels of intoxication.
+
+```{r}
+
+rd_08 <- rdrobust(
+  y = dwi$recidivism,
+  x = dwi$bac_c_08,
+  c = 0,
+  p = 1,
+  kernel = "triangular"
+)
+
+summary(rd_08)
+
+h_08 <- as.numeric(rd_08$bws[1,1])
+
+h_08
+```
+
+# **11. Local Linear RD Estimates Using fixest (Main Specification)**
+
+## **Interpretation of Main RD Estimates**
+
+We estimate the causal effect of crossing the 0.08 BAC threshold on recidivism using a local linear regression within the optimal bandwidth. The coefficient on the treatment indicator is −0.0183, representing the discontinuous change in recidivism at the cutoff. Among drivers with BAC levels close to the legal limit, those just above the 0.08 threshold are 1.83 percentage points less likely to reoffend than those just below the threshold. This estimate is statistically significant at the 1% level (p \< 0.01), providing strong evidence that the observed effect is not due to random chance. The model includes the running variable and its interaction with treatment, allowing for different slopes on either side of the cutoff, and uses heteroskedasticity-robust standard errors to ensure reliable inference. Interpreted within the regression discontinuity framework, and supported by density and covariate balance tests, this result suggests that harsher DUI penalties at the 0.08 cutoff have a deterrent effect on future drunk driving behavior. Importantly, this estimate represents a local average treatment effect, applying specifically to drivers near the cutoff and not necessarily generalizing to individuals with substantially higher BAC levels.
+
+We estimate the causal effect of crossing the 0.08 BAC threshold on recidivism using a local linear regression within the optimal bandwidth.
+
+The coefficient on **treat** is **-0.0183**, representing the discontinuous jump in recidivism at the cutoff.
+
+### 
+
+```{r}
+
+main_08 <- run_local_rd(
+  dwi,
+  outcome = "recidivism",
+  running = "bac_c_08",
+  h = h_08
+)
+
+etable(
+  list("Main RD Model (0.08 cutoff)" = main_08$model),
+  digits = 4
+)
+```
+
+# 12. Robustness Check: Local RD Estimates with Covariate Adjustment
+
+## **Interpretation of Robustness Check with Covariates**
+
+We re-estimate the local linear regression discontinuity model including observable covariates—gender, race, age, and accident involvement to assess the sensitivity of the baseline results to additional controls. The estimated treatment effect remains stable, changing only marginally from −0.0183 to −0.0182, and continues to be statistically significant at the 1% level. This similarity in estimates suggests that the main RD results are not driven by differences in observable characteristics around the cutoff. Overall, the robustness of the estimates to the inclusion of covariates reinforces the credibility of the RD design, indicating that individuals just above and below the threshold are comparable and supporting a causal interpretation of the treatment effect.
+
+```{r}
+
+controls <- c("male", "white", "aged", "acc")
+
+ctrl_08 <- run_local_rd(
+  dwi,
+  outcome = "recidivism",
+  running = "bac_c_08",
+  h = h_08,
+  controls = controls
+)
+
+etable(
+  list(
+    "0.08 no controls" = main_08$model,
+    "0.08 + controls" = ctrl_08$model
+  ),
+  digits = 4
+)
+```
+
+```{r}
+
+controls <- c("male", "white", "aged", "acc")
+
+ctrl_08 <- run_local_rd(
+  dwi,
+  outcome = "recidivism",
+  running = "bac_c_08",
+  h = h_08,
+  controls = controls
+)
+
+etable(
+  list(
+    "0.08 no controls" = main_08$model,
+    "0.08 + controls" = ctrl_08$model
+  ),
+  digits = 4
+)
+```
+
+The estimated treatment effect remains virtually unchanged when covariates are included, shifting only slightly from −0.0183 to −0.0182, and remains statistically significant at the 1% level. This stability indicates that the estimated discontinuity is not driven by observable differences in characteristics around the cutoff, supporting the validity of the identification strategy. The consistency of the estimates across specifications strengthens the credibility of the regression discontinuity design and reinforces the interpretation of the main estimate as a causal effect. While the inclusion of covariates modestly increases the model’s explanatory power (R² rising from 0.0008 to 0.0042), it does not meaningfully alter the estimated treatment effect, further confirming the robustness of the results.
+
+# 13. Robustness Check: Sensitivity to Bandwidth Choice
+
+To assess the robustness of our results to bandwidth choice, we re-estimate the local linear RD model across a range of bandwidths from 0.005 to 0.03. This allows us to examine whether the estimated treatment effect is sensitive to how narrowly or broadly we define the neighborhood around the cutoff.
+
+Across all bandwidths, the estimated treatment effect remains consistently negative, ranging from approximately **-0.012 to -0.018**. As the bandwidth increases, the estimates become slightly more negative and more precisely estimated, reflecting the inclusion of more observations.
+
+In terms of statistical significance, the smallest bandwidths yield imprecise estimates with confidence intervals that include zero. However, for moderate to larger bandwidths (h ≥ 0.015), the confidence intervals exclude zero, indicating statistically significant effects.
+
+Overall, the stability of the estimates across bandwidth choices supports the robustness of the main findings. The results consistently indicate that crossing the 0.08 BAC threshold reduces recidivism, reinforcing the interpretation of a negative and causal treatment effect.
+
+```{r}
+
+run_bandwidth_grid <- function(data, outcome, running, bandwidths) {
+  map_dfr(bandwidths, function(h) {
+    fit <- run_local_rd(data, outcome = outcome, running = running, h = h)$model
+    tibble(
+      bandwidth = h,
+      estimate = coef(fit)["treat"],
+      se = se(fit)["treat"]
+    )
+  }) %>%
+    mutate(
+      ci_low = estimate - 1.96 * se,
+      ci_high = estimate + 1.96 * se
+    )
+}
+
+bws_08 <- c(0.005, 0.0075, 0.01, 0.015, 0.02, 0.03)
+
+bw_results_08 <- run_bandwidth_grid(
+  dwi,
+  "recidivism",
+  "bac_c_08",
+  bws_08
+)
+
+bw_results_08
+```
+
+```{r}
+
+ggplot(bw_results_08, aes(x = bandwidth, y = estimate)) +
+  geom_point(color = "steelblue", size = 2) +
+  geom_line(color = "steelblue") +
+  geom_errorbar(aes(ymin = ci_low, ymax = ci_high), width = 0.0005) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    title = "Bandwidth Sensitivity: 0.08 BAC Cutoff",
+    x = "Bandwidth",
+    y = "Estimated Jump in Recidivism"
+  ) +
+  theme_minimal()
+```
+
+# 14. Robustness Check: Local Linear vs. Local Quadratic RD Estimates
+
+We estimate the effect of crossing the 0.08 BAC threshold on recidivism using both local linear and local quadratic regression discontinuity specifications with heteroskedasticity-robust standard errors, in order to assess the sensitivity of the results to functional form assumptions. The estimated treatment effect is −0.0183 in the local linear model and −0.0171 in the local quadratic model, both indicating a reduction in recidivism for individuals just above the cutoff. The local linear estimate is statistically significant at the 1% level, while the quadratic specification remains significant at the 5% level, reflecting the increased variance associated with more flexible polynomial models.
+
+In narrow terms, drivers with BAC levels just above 0.08 are approximately 1.7–1.8 percentage points less likely to reoffend than those just below the threshold. The close similarity of the estimates across specifications indicates that the results are not sensitive to the choice of polynomial order, suggesting that the findings are not driven by functional form assumptions. Interpreted causally under standard RD assumptions, these results provide evidence that harsher DUI penalties at the legal threshold have a deterrent effect on future drunk-driving behavior. As with all regression discontinuity estimates, this effect is local and applies specifically to individuals with BAC levels near the cutoff.
+
+```{r}
+
+run_local_rd_quad <- function(data, outcome, running, h, controls = NULL) {
+  tmp <- data %>%
+    filter(!is.na(.data[[running]]), !is.na(.data[[outcome]])) %>%
+    filter(abs(.data[[running]]) <= h) %>%
+    mutate(
+      run = .data[[running]],
+      treat = if_else(run >= 0, 1, 0),
+      w = tri_kernel(run, h)
+    )
+
+  rhs <- "treat + run + I(run^2) + treat:run + treat:I(run^2)"
+
+  if (!is.null(controls) && length(controls) > 0) {
+    rhs <- paste(rhs, paste(controls, collapse = ' + '), sep = ' + ')
+  }
+
+  fml <- as.formula(paste(outcome, "~", rhs))
+
+  model <- feols(
+    fml,
+    data = tmp,
+    weights = ~w,
+    vcov = "hetero"
+  )
+
+  list(model = model, data = tmp)
+}
+
+quad_08 <- run_local_rd_quad(
+  dwi,
+  "recidivism",
+  "bac_c_08",
+  h_08
+)
+
+etable(
+  list(
+    "0.08 local linear" = main_08$model,
+    "0.08 local quadratic" = quad_08$model
+  ),
+  digits = 4
+)
+```
+
+# 15. Handle the two BAC tests explicitly
+
+### **15. Handling Multiple BAC Measures**
+
+We treat the first BAC reading (`bac1`) as the primary running variable because it is the assignment-relevant measure used to determine legal penalties at the time of the traffic stop. Since the regression discontinuity design relies on the variable that governs treatment assignment, `bac1` provides the most appropriate basis for identification.
+
+To assess whether our results depend on the choice of BAC measurement, we re-estimate the model using alternative definitions of blood alcohol content, including the second reading (`bac2`), the average of the two tests (`bac_mean`), and the maximum reading (`bac_max`). These specifications serve as robustness checks to evaluate whether measurement variation affects the estimated treatment effect.
+
+Across all specifications, the estimated treatment effect remains consistently negative and statistically significant, ranging from −0.0183 in the baseline model to −0.0257 when using the maximum BAC measure. This implies that drivers just above the 0.08 threshold are between approximately 1.8 and 2.6 percentage points less likely to reoffend than those just below the cutoff. The similarity in sign and magnitude across different BAC measures indicates that the results are not driven by a particular measurement choice.
+
+Overall, these findings reinforce the robustness of the main results and strengthen the credibility of the regression discontinuity design. Interpreted causally under standard RD assumptions, the evidence suggests that harsher DUI penalties at the 0.08 threshold have a deterrent effect on future drunk-driving behavior among marginal offenders.
+
+```{r}
+
+run_alt_bac_rd <- function(data, bac_var, cutoff, outcome = "recidivism", h = h_08) {
+  tmp <- data %>%
+    filter(!is.na(.data[[bac_var]]), !is.na(.data[[outcome]])) %>%
+    mutate(
+      run = .data[[bac_var]] - cutoff,
+      treat = if_else(.data[[bac_var]] >= cutoff, 1, 0),
+      w = tri_kernel(run, h)
+    ) %>%
+    filter(abs(run) <= h)
+
+  feols(
+    recidivism ~ treat + run + treat:run,
+    data = tmp,
+    weights = ~w,
+    vcov = "hetero"
+  )
+}
+
+alt_08_bac1 <- run_alt_bac_rd(dwi, "bac1", 0.08)
+alt_08_bac2 <- run_alt_bac_rd(dwi, "bac2", 0.08)
+alt_08_mean <- run_alt_bac_rd(dwi, "bac_mean", 0.08)
+alt_08_max  <- run_alt_bac_rd(dwi, "bac_max", 0.08)
+
+etable(
+  list(
+    "Primary BAC (bac1)" = alt_08_bac1,
+    "Second Reading (bac2)" = alt_08_bac2,
+    "Average BAC" = alt_08_mean,
+    "Maximum BAC" = alt_08_max
+  ),
+  digits = 4
+)
+```
+
+# 16. Placebo Tests with Alternative BAC Cutoffs
+
+To assess the validity of the regression discontinuity design, we conduct placebo tests using alternative BAC thresholds where no policy change occurs. If the estimated effect at 0.08 reflects a true causal impact of harsher penalties, we should not observe similar discontinuities at other, arbitrary cutoffs.
+
+We estimate the treatment effect at several placebo thresholds (0.06, 0.07, 0.09, 0.10, 0.13, 0.14, and 0.16) using the same local linear specification as in the main analysis. Across all placebo cutoffs, the estimated effects are small in magnitude and statistically insignificant, with confidence intervals that include zero.
+
+This contrasts sharply with the main result at the **0.08** threshold, where we observe a statistically significant negative discontinuity. The absence of significant effects at nearby placebo cutoffs suggests that the observed drop in recidivism at **0.08** is not driven by underlying trends or spurious discontinuities in the data.
+
+Overall, these placebo tests provide strong support for the key identification assumption of the RD design namely, that in the absence of treatment, outcomes would evolve smoothly through the cutoff. This strengthens the credibility of our causal interpretation and reinforces the conclusion that harsher DUI penalties at the legal threshold reduce future drunk-driving behavior.
+
+```{r}
+
+run_fake_cutoff <- function(data, outcome, bac_var, fake_cutoff, h = 0.02) {
+  tmp <- data %>%
+    filter(!is.na(.data[[bac_var]]), !is.na(.data[[outcome]])) %>%
+    mutate(
+      run = .data[[bac_var]] - fake_cutoff,
+      treat = if_else(.data[[bac_var]] >= fake_cutoff, 1, 0),
+      w = tri_kernel(run, h)
+    ) %>%
+    filter(abs(run) <= h)
+
+  fit <- feols(
+    as.formula(paste(outcome, "~ treat + run + treat:run")),
+    data = tmp,
+    weights = ~w,
+    vcov = "hetero"
+  )
+
+  tibble(
+    cutoff = fake_cutoff,
+    estimate = coef(fit)["treat"],
+    se = se(fit)["treat"]
+  )
+}
+
+fake_cutoffs <- c(0.06, 0.07, 0.09, 0.10, 0.13, 0.14, 0.16)
+
+fake_results <- map_dfr(fake_cutoffs, ~run_fake_cutoff(dwi, "recidivism", "bac1", .x, h = 0.02)) %>%
+  mutate(
+    ci_low = estimate - 1.96 * se,
+    ci_high = estimate + 1.96 * se
+  )
+
+fake_results
+```
+
+```{r}
+
+ggplot(fake_results, aes(x = cutoff, y = estimate)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = ci_low, ymax = ci_high), width = 0.002) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_vline(xintercept = c(0.08), linetype = "dotted") +
+  labs(
+    title = "Placebo Cutoff Estimates",
+    x = "Fake BAC Cutoff",
+    y = "Estimated Jump in Recidivism"
+  )
+```
+
+# 17. Summary of Main and Robustness RD Estimates at the 0.08 BAC Threshold
+
+The estimates across the main and robustness specifications are highly consistent, reinforcing the stability of the findings. In the baseline local linear model, the estimated treatment effect is **−0.0183** and statistically significant at the 1% level. This estimate remains virtually unchanged when observable covariates are included **(−0.0182),** and is only slightly attenuated in the local quadratic specification **(−0.0171),** where it remains statistically significant at the 5% level.
+
+Across all specifications, both the magnitude and direction of the effect are remarkably stable, indicating that the results are not sensitive to the inclusion of controls or to alternative functional form assumptions. In substantive terms, these estimates imply that individuals just above the **0.08 BAC** threshold are approximately **1.7 to 1.8** percentage points less likely to re-offend than those just below the cutoff.
+
+Taken together, the consistency of the estimates and their statistical significance provide strong evidence that the observed reduction in recidivism reflects a credible causal effect of harsher DUI penalties at the legal threshold.
+
+```{r}
+
+modelsummary(
+  list(
+    "Main: 0.08 local linear" = main_08$model,
+    "Robustness: 0.08 + controls" = ctrl_08$model,
+    "Robustness: 0.08 local quadratic" = quad_08$model
+  ),
+  coef_map = c(
+    "treat" = "Above cutoff",
+    "run" = "BAC relative to cutoff",
+    "treat:run" = "Above cutoff × BAC relative to cutoff"
+  ),
+  gof_omit = "AIC|BIC|Log.Lik|Adj|Within|Pseudo",
+  stars = TRUE,
+  output = "markdown"
+)
+
+```
+
+# 18. Final Estimation Object for Interpretation
+
+To summarize our main findings, we extract the treatment effect from the preferred local linear regression discontinuity specification at the **0.08 BAC** cutoff. The estimated coefficient on the treatment indicator is **−0.0183**, with a standard error of approximately **0.0057,** yielding a statistically significant effect (**p \< 0.01).** The corresponding 95% confidence interval ranges from approximately −**0.0294 to −0.0072,** indicating that the effect is both precisely estimated and robustly different from zero.
+
+In substantive terms, this estimate implies that drivers just above the legal BAC threshold are about 1.8 percentage points less likely to reoffend compared to those just below the cutoff. The negative and statistically significant treatment effect provides strong evidence of a discontinuous drop in recidivism at the legal threshold.
+
+Interpreted within the regression discontinuity framework, and under standard identification assumptions, this result supports a causal interpretation: stricter DUI penalties triggered at the 0.08 BAC limit lead to a meaningful reduction in future offending among marginal drivers.
+
+```{r}
+
+best_estimate <- tidy(main_08$model) %>%
+  filter(term == "treat") %>%
+  mutate(
+    ci_low = estimate - 1.96 * std.error,
+    ci_high = estimate + 1.96 * std.error
+  )
+
+best_estimate
+```
+
+# **19. Limitations and Robustness Considerations**
+
+While the regression discontinuity design provides credible causal identification, several limitations warrant consideration.
+
+First, the estimated effect is inherently local to individuals near the 0.08 BAC cutoff. As such, the results identify a local average treatment effect and may not generalize to individuals with substantially lower or higher BAC levels. This limits the external validity of the findings and suggests caution when interpreting the results as a broader policy effect.
+
+Second, measurement error in BAC may attenuate the estimated discontinuity. If BAC readings are imprecise, some individuals may be misclassified around the cutoff, weakening the sharpness of treatment assignment and biasing the estimated effect toward zero.
+
+Third, although the RD design provides strong internal validity, the findings remain context-specific, as enforcement intensity, legal consequences, and behavioral responses may differ across jurisdictions or populations.
+
+Finally, the estimates may be sensitive to modeling choices such as bandwidth selection and functional form. Although we employ data-driven bandwidth selection and local linear specifications to mitigate these concerns, alternative specifications may yield modest differences in magnitude.
+
+Taken together, these considerations suggest that while the results provide credible causal evidence, they should be interpreted as locally valid estimates with limited external generalizability.
+
+## 20. Conclusion and Policy Implications
+
+This study examines whether harsher DUI penalties at the 0.08 BAC legal threshold reduce the likelihood of future drunk-driving offenses using a regression discontinuity design. By exploiting the discontinuous increase in punishment severity at this cutoff, the analysis isolates plausibly exogenous variation in treatment among drivers with otherwise similar characteristics, allowing for credible causal inference.
+
+Across graphical evidence, local linear regression estimates, and a range of robustness checks, the results consistently indicate a negative and statistically significant effect of harsher punishment on recidivism. The preferred specification suggests that drivers just above the **0.08** threshold are approximately **1.7–1.8** percentage points less likely to commit a future DUI offense compared to those just below the cutoff. This effect is economically meaningful and remains stable across alternative bandwidths, functional forms, and definitions of the BAC measure, reinforcing the robustness and credibility of the findings. The use of a data-driven bandwidth selection procedure further ensures an optimal balance between bias and variance, aligning with best practices in the modern regression discontinuity literature.
+
+The validity of this causal interpretation is supported by diagnostic tests. The density of the running variable is smooth at the cutoff, indicating no evidence of manipulation, while observable covariates remain continuous through the threshold, supporting the assumption of local comparability. Taken together, these results suggest that treatment assignment near the cutoff is effectively quasi-random. As a result, the observed discontinuity in recidivism can be interpreted as a causal effect of harsher punishment rather than a reflection of underlying differences in driver behavior.
+
+From a policy perspective, the findings provide compelling evidence that harsher DUI penalties generate a meaningful deterrent effect among marginal drivers. This suggests that enforcement mechanisms tied to clear and credible legal thresholds can play an important role in reducing repeat offenses and improving public safety. More broadly, the results highlight the importance of marginal deterrence: individuals near the legal limit appear responsive to changes in punishment severity, implying that well-designed threshold-based policies can influence behavior even if their impact is not uniform across all offenders.
+
+However, the estimated effect should be interpreted as local to individuals near the 0.08 cutoff. As such, the results may not generalize to drivers with substantially higher levels of intoxication or to different institutional contexts. In addition, potential measurement error in BAC, the presence of multiple test readings, and broader behavioral or enforcement responses may influence the magnitude of the estimated effect. While the regression discontinuity design addresses confounding near the cutoff, it does not capture longer-term behavioral adaptations or equilibrium responses that may arise from policy changes.
+
+Overall, the analysis demonstrates that well-designed quasi-experimental methods can provide credible evidence on the effectiveness of public policy interventions. Taken together, the consistency of the results across specifications, validation tests, and alternative measures provides strong evidence that the observed discontinuity reflects a true causal effect rather than spurious correlation. These findings contribute to the broader literature on crime and punishment by providing clear empirical support for policies that impose stricter penalties at critical legal thresholds, while emphasizing that such effects are concentrated among marginal offenders rather than uniformly across the population.
